@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Clevr Gate for Claude Code — one-line installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/clevrsecurity/clevr-claude-code/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/clevrsecurity-io/Plugins/main/clevr-claude-code/install.sh | bash
 #
 # Adds the Clevr marketplace and installs the clevr-gate plugin via the Claude
 # Code CLI, then prints the environment you need to set to enforce.
 set -euo pipefail
 
-REPO="${CLEVR_PLUGIN_REPO:-clevrsecurity/clevr-claude-code}"
+REPO="${CLEVR_PLUGIN_REPO:-clevrsecurity-io/Plugins}"
 MARKETPLACE="${CLEVR_PLUGIN_MARKETPLACE:-clevr}"
 PLUGIN="${CLEVR_PLUGIN_NAME:-clevr-gate}"
 
@@ -34,5 +34,5 @@ anything yet):
   export CLEVR_URL=https://your-clevr-host    # default http://localhost:8787
 
 Then start Claude Code. Every tool call is evaluated by Clevr before it runs:
-allow proceeds, escalate asks you, block is refused, all with a signed receipt.
+allow proceeds, escalate is held for review, block is refused, all with a signed receipt.
 EOF

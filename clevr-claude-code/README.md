@@ -23,22 +23,22 @@ By default the plugin runs in **shadow mode**: it evaluates and records every ve
 In Claude Code (CLI or desktop app), add the marketplace, then install the plugin:
 
 ```
-/plugin marketplace add clevrsecurity/clevr-claude-code
+/plugin marketplace add clevrsecurity-io/Plugins
 /plugin install clevr-gate@clevr
 ```
 
 Non-interactively, from a shell:
 
 ```bash
-claude plugin marketplace add clevrsecurity/clevr-claude-code
+claude plugin marketplace add clevrsecurity-io/Plugins
 claude plugin install clevr-gate@clevr
 ```
 
 To try it from a local clone without installing:
 
 ```bash
-git clone https://github.com/clevrsecurity/clevr-claude-code
-claude --plugin-dir ./clevr-claude-code
+git clone https://github.com/clevrsecurity-io/Plugins
+claude --plugin-dir ./Plugins/clevr-claude-code
 ```
 
 ## Configure
