@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      { "command": "node ~/.cursor/clevr-hooks/clevr-gate.mjs" }
+    ]
+  }
+}
