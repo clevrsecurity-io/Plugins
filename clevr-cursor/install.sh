@@ -40,9 +40,10 @@ or launch Cursor from a terminal that has them exported):
   export CLEVR_URL=https://your-clevr-host
   export CLEVR_API_KEY=clevr_sk_...
   export CLEVR_AGENT=cursor
-  export CLEVR_MODE=shadow      # records only; set to 'enforce' to block/hold
+  # Mode is set in the console (a new agent observes first). Optionally set
+  # CLEVR_MODE=shadow to force record-only on this machine.
 
-Restart Cursor. In shadow mode every Agent tool call is evaluated and recorded
-with a signed receipt, and nothing is blocked. Flip CLEVR_MODE to enforce when
-the agent is profiled and you trust the policies.
+Restart Cursor. Every Agent tool call is evaluated, recorded, and signed. The
+console decides shadow vs enforce per agent (a new agent observes first, floor
+still blocks); promote it to enforce from the console when you trust it.
 ENV

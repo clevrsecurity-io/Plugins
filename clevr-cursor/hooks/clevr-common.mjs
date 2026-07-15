@@ -19,8 +19,10 @@ export function trunc (s, n = 300) {
 //                   (allows), so an unconfigured install never bricks Cursor.
 //   CLEVR_URL       engine base URL. Default http://localhost:8787.
 //   CLEVR_AGENT     identity recorded in the audit log. Default 'cursor'.
-//   CLEVR_MODE      'shadow' (default) records every verdict but NEVER blocks;
-//                   'enforce' actually blocks / holds.
+//   CLEVR_MODE      unset (default) OBEYS the engine verdict — the workspace and
+//                   per-agent mode set in the console decide whether an action is
+//                   shadowed or blocked (a new agent observes first). Set 'shadow'
+//                   to force THIS machine to record-only, regardless of the engine.
 //   CLEVR_ESCALATE  what a step-up does: 'deny' (default) HOLDS the action (a
 //                   synchronous hook cannot wait for an async console approval);
 //                   'ask' prompts the LOCAL operator instead.
@@ -36,7 +38,7 @@ export function loadConfig () {
     base: (process.env.CLEVR_URL || 'http://localhost:8787').replace(/\/$/, ''),
     agent: process.env.CLEVR_AGENT || 'cursor',
     failsafe: (process.env.CLEVR_FAILSAFE || 'open').toLowerCase(),
-    mode: (process.env.CLEVR_MODE || 'shadow').toLowerCase(),
+    mode: (process.env.CLEVR_MODE || 'enforce').toLowerCase(),
     autoApprove: process.env.CLEVR_AUTO_APPROVE === '1',
     escalate: (process.env.CLEVR_ESCALATE || 'deny').toLowerCase(),
     forwardCtx: process.env.CLEVR_FORWARD_CONTEXT !== '0',

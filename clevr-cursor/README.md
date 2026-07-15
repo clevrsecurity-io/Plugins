@@ -32,19 +32,27 @@ Then make the configuration visible to the environment Cursor runs in (set it in
 export CLEVR_URL=https://your-clevr-host
 export CLEVR_API_KEY=clevr_sk_...
 export CLEVR_AGENT=cursor
-export CLEVR_MODE=shadow      # records only; 'enforce' blocks/holds
+# Mode is set in the console (a new agent observes first). Optionally set
+# CLEVR_MODE=shadow to force record-only on this machine.
 ```
 
 Restart Cursor.
 
 ## Modes
 
-- **shadow** (default): every Agent tool call is evaluated and recorded with a
-  signed receipt, and **nothing is blocked**. A fresh install observes without
-  changing Cursor's behavior.
-- **enforce**: `block` denies the tool, `escalate` holds it (a synchronous hook
-  cannot wait for an async console approval, so an un-approved step-up does not
-  run; set `CLEVR_ESCALATE=ask` to prompt the local operator instead).
+By default the hook **obeys the engine verdict**. The engine decides whether an
+action is shadowed or blocked from the workspace and per-agent mode you set in the
+console, and a **new agent observes first** (watched and signed, but only the
+safety floor blocks) until you promote it to enforce. So a fresh install can't
+brick Cursor, and you flip the whole fleet from one place, not per machine.
+
+When the engine enforces: `block` denies the tool, `escalate` holds it (a
+synchronous hook cannot wait for an async console approval, so an un-approved
+step-up does not run; set `CLEVR_ESCALATE=ask` to prompt the local operator).
+
+Set **`CLEVR_MODE=shadow`** to override locally: this machine records every verdict
+but never blocks, whatever the engine returned. A per-developer escape hatch, not
+the fleet control.
 
 ## All settings
 
@@ -53,7 +61,7 @@ Restart Cursor.
 | `CLEVR_API_KEY` | (none) | Org key. **Unset = hook inactive** (never bricks Cursor). |
 | `CLEVR_URL` | `http://localhost:8787` | Engine base URL. |
 | `CLEVR_AGENT` | `cursor` | Identity in the audit log. |
-| `CLEVR_MODE` | `shadow` | `shadow` records; `enforce` blocks/holds. |
+| `CLEVR_MODE` | (unset) | Unset obeys the engine (the console decides). `shadow` forces record-only on this machine. |
 | `CLEVR_ESCALATE` | `deny` | Step-up: `deny` holds, `ask` prompts the local operator. |
 | `CLEVR_AUTO_APPROVE` | off | `1` makes Clevr the sole gate (emit allow past Cursor's own prompt). |
 | `CLEVR_FAILSAFE` | `open` | On engine error: `open` allows, `closed` denies. |

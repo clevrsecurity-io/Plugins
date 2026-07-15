@@ -97,9 +97,11 @@ async function main () {
   const reason = v.reason || '';
   const tag = v.decision_id ? ` [${v.decision_id}]` : '';
 
-  // Shadow: the decision is already sealed server-side by the POST above; never
-  // blocks, so a first install observes without altering Cursor. Flip to enforce
-  // once the agent is profiled and you trust the policies.
+  // Local override: CLEVR_MODE=shadow forces THIS machine to record-only, never
+  // blocking, whatever the engine returned (the decision is already sealed
+  // server-side by the POST above). Default (unset) obeys the engine — the
+  // console's per-agent / workspace mode decides shadow vs enforce, and a new
+  // agent observes first, so an install still can't brick Cursor out of the box.
   if (cfg.mode === 'shadow') out(null);
 
   if (effect === 'block') out('deny', `Clevr blocked this action: ${reason}${tag}`);
