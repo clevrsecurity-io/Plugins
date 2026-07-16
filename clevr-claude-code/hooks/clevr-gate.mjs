@@ -69,18 +69,32 @@ async function main () {
     out(null);
   }
 
-  const { tool_name = 'unknown', tool_input = {}, session_id, transcript_path, cwd } = hook;
+  const { tool_name = 'unknown', tool_input = {}, session_id, transcript_path, cwd, agent_id, agent_type } = hook;
   const { action_type, action, target } = classify(tool_name, tool_input);
+
+  // Delegation lineage (ASSERTED, not IdP-verified). Claude Code populates
+  // agent_id + agent_type when a tool runs INSIDE a spawned sub-agent. We model
+  // it as the sub-agent acting on behalf of the main agent, so the signed audit
+  // lineage branches per sub-agent (main -> sub-agent -> tool call). agent_id is
+  // the harness's INTERNAL handle, NOT an identity issued by an IdP, so the hop
+  // is tagged identity:'asserted' and must never be presented as verified.
+  const actorChain = [{ type: 'agent', id: cfg.agent, display: cfg.agent }];
+  if (agent_id) {
+    const subName = agent_type || 'subagent';
+    actorChain.push({ type: 'agent', id: subName, display: subName, on_behalf_of: cfg.agent, harness_agent_id: agent_id, identity: 'asserted' });
+  }
 
   const body = {
     agent: cfg.agent, tool: tool_name, action_type, action, target,
     environment: cfg.env,
     session_id: session_id || null,
+    // Who acted, on whose behalf — the delegation chain the lineage branches on.
+    actor_chain: actorChain,
     // Surface the tool's arguments as target_attr so deterministic argument
     // rules (target.<name>, e.g. target.amount > 10000) can gate on them —
     // mirrors the SDK adapters.
     target_attr: (tool_input && typeof tool_input === 'object' && !Array.isArray(tool_input)) ? tool_input : null,
-    metadata: { input: tool_input, cwd, source: 'claude-code' },
+    metadata: { input: tool_input, cwd, source: 'claude-code', agent_id: agent_id || null, agent_type: agent_type || null },
   };
   if (cfg.forwardCtx && transcript_path) {
     const convo = readConversation(transcript_path, cfg.contextTurns);
