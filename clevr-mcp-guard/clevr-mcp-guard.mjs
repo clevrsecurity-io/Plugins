@@ -28,6 +28,8 @@
 
 import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
+import http from 'node:http'
+import https from 'node:https'
 
 const argv = process.argv.slice(2)
 const dash = argv.indexOf('--')
@@ -64,14 +66,40 @@ const forward = (line) => { if (up.stdin.writable) up.stdin.write(line + '\n') }
 
 function trunc (s, n = 400) { s = String(s ?? ''); return s.length > n ? s.slice(0, n) + '…' : s }
 
+// POST JSON with the built-in http/https module on a one-shot socket
+// (agent:false), NOT global fetch. This proxy calls process.exit() when its
+// upstream MCP server dies; a pooled undici keep-alive socket mid-close at that
+// moment trips a libuv assertion on Windows (!(handle->flags & UV_HANDLE_CLOSING),
+// src\win\async.c). A one-shot socket closes on response end, so nothing is
+// mid-close when the process exits.
+function httpPostJson (urlStr, { headers = {}, body = '', timeoutMs = 8000 } = {}) {
+  return new Promise((resolve, reject) => {
+    let url
+    try { url = new URL(urlStr) } catch (e) { reject(e); return }
+    const mod = url.protocol === 'https:' ? https : http
+    const payload = Buffer.from(body)
+    const req = mod.request(url, {
+      method: 'POST',
+      agent: false,
+      headers: { ...headers, 'Content-Length': payload.length },
+    }, (res) => {
+      let data = ''
+      res.setEncoding('utf8')
+      res.on('data', (c) => { data += c })
+      res.on('end', () => resolve({ status: res.statusCode || 0, body: data }))
+    })
+    req.on('error', reject)
+    req.setTimeout(timeoutMs, () => req.destroy(new Error(`timeout after ${timeoutMs}ms`)))
+    req.end(payload)
+  })
+}
+
 // Ask the engine about one tools/call. Returns {effect, reason, decision_id}.
 async function evaluate (name, args) {
-  const ctrl = new AbortController()
-  const t = setTimeout(() => ctrl.abort(), CFG.timeoutMs)
   try {
-    const res = await fetch(`${CFG.url}/v1/evaluate`, {
-      method: 'POST', signal: ctrl.signal,
+    const res = await httpPostJson(`${CFG.url}/v1/evaluate`, {
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${CFG.key}` },
+      timeoutMs: CFG.timeoutMs,
       body: JSON.stringify({
         agent: CFG.agent,
         tool: name,
@@ -83,11 +111,11 @@ async function evaluate (name, args) {
         metadata: { source: 'mcp-guard', host: CFG.agent, upstream: upstreamCmd[0] },
       }),
     })
-    if (!res.ok) return { error: `http_${res.status}` }
-    return await res.json()
+    if (res.status < 200 || res.status >= 300) return { error: `http_${res.status}` }
+    try { return JSON.parse(res.body) } catch { return { error: 'bad_json' } }
   } catch (e) {
-    return { error: e.name === 'AbortError' ? 'timeout' : e.message }
-  } finally { clearTimeout(t) }
+    return { error: /^timeout/.test(e.message) ? 'timeout' : e.message }
+  }
 }
 
 // A JSON-RPC result that tells the host the tool was denied, WITHOUT running it.

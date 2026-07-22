@@ -9,6 +9,9 @@
 // Agent's (Composer) tool calls IN the agent loop, before they run, even though
 // Cursor's model itself is locked to Cursor's backend.
 
+import http from 'node:http';
+import https from 'node:https';
+
 export function trunc (s, n = 300) {
   s = String(s ?? '');
   return s.length <= n ? s : s.slice(0, n - 1) + '...';
@@ -47,6 +50,37 @@ export function loadConfig () {
   };
 }
 
+// POST JSON to the engine using the built-in http/https module with
+// `agent: false` (a one-shot socket, no keep-alive pool) rather than global
+// fetch — ON PURPOSE. A hook is a one-shot process that calls process.exit()
+// the instant it has its answer. fetch (undici) leaves a pooled keep-alive
+// socket open; exiting while that socket is mid-close trips a libuv assertion on
+// Windows (!(handle->flags & UV_HANDLE_CLOSING), src\win\async.c line 76) and
+// aborts the process with a fatal exit code, so the host reports a "hook error"
+// even though the gate answered fine. agent:false closes the socket as soon as
+// the response ends, leaving no handle for process.exit to race with.
+function httpPostJson (urlStr, { headers = {}, body = '', timeoutMs = 4000 } = {}) {
+  return new Promise((resolve, reject) => {
+    let url;
+    try { url = new URL(urlStr); } catch (e) { reject(e); return; }
+    const mod = url.protocol === 'https:' ? https : http;
+    const payload = Buffer.from(body);
+    const req = mod.request(url, {
+      method: 'POST',
+      agent: false,                 // one-shot socket: no pool, no lingering handle
+      headers: { ...headers, 'Content-Length': payload.length },
+    }, (res) => {
+      let data = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { data += c; });
+      res.on('end', () => resolve({ status: res.statusCode || 0, body: data }));
+    });
+    req.on('error', reject);
+    req.setTimeout(timeoutMs, () => req.destroy(new Error(`timeout after ${timeoutMs}ms`)));
+    req.end(payload);
+  });
+}
+
 // POST an action to the engine and return how it resolved. Never throws; the
 // caller applies the failsafe. Shapes:
 //   { inactive: true }            no API key — the hook is off
@@ -56,17 +90,13 @@ export function loadConfig () {
 export async function postEvaluate (cfg, body) {
   if (!cfg.apiKey) return { inactive: true };
   try {
-    const ctl = new AbortController();
-    const timer = setTimeout(() => ctl.abort(), cfg.timeoutMs);
-    const r = await fetch(`${cfg.base}/v1/evaluate`, {
-      method: 'POST',
+    const r = await httpPostJson(`${cfg.base}/v1/evaluate`, {
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
       body: JSON.stringify(body),
-      signal: ctl.signal,
+      timeoutMs: cfg.timeoutMs,
     });
-    clearTimeout(timer);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return { verdict: await r.json() };
+    if (r.status < 200 || r.status >= 300) throw new Error(`HTTP ${r.status}`);
+    return { verdict: JSON.parse(r.body) };
   } catch (e) {
     if (cfg.failsafe === 'closed') return { failclosed: true, reason: `Clevr engine unreachable (${e.message}); fail-closed.` };
     return { failopen: true, reason: e.message };
