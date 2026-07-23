@@ -81,3 +81,14 @@ default.
 It gates the agent's **tool executions**; it does not reroute the model, and it
 does not read the model's tokens. That is the point: govern what the agent does,
 not how it thinks.
+
+## Troubleshooting
+
+**A "hook error" that quotes your version manager (mise, asdf, nvm, direnv).** The
+hooks run `node`. If your `node` is provided by a version manager, that tool runs
+on every invocation and can print its own warnings to stderr, and Cursor surfaces
+those as a hook error even though the gate ran fine and the action still proceeds.
+This is your environment, not Clevr: the same message appears on any hook that runs
+a command. For example, `mise WARN deprecated [...]` means a setting in your mise
+config is deprecated. Fix it at the source (update the deprecated setting, e.g. in
+`~/.config/mise/config.toml`) or silence the manager for hooks (e.g. `MISE_QUIET=1`).

@@ -104,6 +104,10 @@ This is the GUARD path of Clevr applied to an agent you did not write, with no L
 
 Claude Code (CLI or desktop app), with Node on the PATH (the hooks run `node`, which Claude Code already needs). The engine must be reachable from that machine at `CLEVR_URL`. Plugins do not run in Claude Code cloud sessions, so use a local or SSH session.
 
+## Troubleshooting
+
+**A "hook error" that quotes your version manager (mise, asdf, nvm, direnv).** The hooks run `node`. If your `node` is provided by a version manager, that tool runs on every invocation and can print its own warnings to stderr, and Claude Code surfaces those as a hook error even though the gate ran fine and the action still proceeds (the status is non-blocking). This is your environment, not Clevr: the same message appears on any hook that runs a command. For example, `mise WARN deprecated [...]` means a setting in your mise config is deprecated. Fix it at the source (update the deprecated setting, e.g. in `~/.config/mise/config.toml`) or silence the manager for hooks (e.g. `MISE_QUIET=1`). A genuine Clevr message names the engine or a decision (`Clevr blocked ...`), not your version manager.
+
 ## License
 
 MIT. See [plugin.json](.claude-plugin/plugin.json).
