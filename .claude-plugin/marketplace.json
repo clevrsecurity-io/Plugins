@@ -10,7 +10,7 @@
       "name": "clevr-gate",
       "source": "./clevr-claude-code",
       "description": "Govern Claude Code through Clevr's runtime policy engine: gate every tool call and scan every prompt.",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "author": { "name": "Clevr Security" },
       "homepage": "https://clevrsecurity.com",
       "license": "MIT",

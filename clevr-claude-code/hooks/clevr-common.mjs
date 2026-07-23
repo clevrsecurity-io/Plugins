@@ -25,12 +25,11 @@ export function trunc (s, n = 300) {
 //                          bricks Claude Code.
 //   CLEVR_URL              engine base URL. Default http://localhost:8787.
 //   CLEVR_AGENT            identity recorded in the audit log. Default 'claude-code'.
-//   CLEVR_MODE             unset (default) OBEYS the engine verdict — the console's
-//                          workspace mode and per-agent mode decide whether an action
-//                          is shadowed or blocked (a new agent observes first). Set
-//                          'shadow' to force THIS machine to record-only, whatever the
-//                          engine returned (a per-developer escape hatch, not the fleet
-//                          control). The console config always prevails.
+//   CLEVR_MODE             unset (default) OBEYS the engine verdict — the
+//                          workspace and per-agent mode set in the console decide
+//                          whether an action is shadowed or blocked (a new agent
+//                          observes first). Set 'shadow' to force THIS machine to
+//                          record-only, regardless of the engine.
 //   CLEVR_FORWARD_CONTEXT  '1' (default) forward recent transcript turns; '0' off.
 //   CLEVR_CONTEXT_TURNS    how many recent turns to forward. Default 6. Raise it to
 //                          widen the window the engine scans (catches an injection
@@ -91,7 +90,20 @@ export function readConversation (path, max = 6) {
           ? m.content.filter((c) => typeof c === 'string' || c.type === 'text')
               .map((c) => (typeof c === 'string' ? c : c.text || '')).join('\n')
           : '';
-      if (content.trim()) msgs.push({ role, content: trunc(content, 1000) });
+      // Preserve the STRUCTURED tool_use blocks (not just the prose). Claude Code's
+      // transcript carries them; forwarding them lets the engine render real
+      // tool-call cards in the conversation and feed the behavioural fingerprint's
+      // tool set, instead of the assistant text alone. args are truncated so a
+      // huge input can't bloat the payload.
+      const toolCalls = Array.isArray(m.content)
+        ? m.content.filter((c) => c && c.type === 'tool_use')
+            .map((c) => ({ name: c.name, args: c.input || {} }))
+        : [];
+      if (content.trim() || toolCalls.length) {
+        const msg = { role, content: trunc(content, 1000) };
+        if (toolCalls.length) msg.tool_calls = toolCalls;
+        msgs.push(msg);
+      }
     }
     return msgs.slice(-max);
   } catch { return []; }
