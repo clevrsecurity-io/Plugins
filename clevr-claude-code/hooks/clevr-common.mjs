@@ -25,8 +25,12 @@ export function trunc (s, n = 300) {
 //                          bricks Claude Code.
 //   CLEVR_URL              engine base URL. Default http://localhost:8787.
 //   CLEVR_AGENT            identity recorded in the audit log. Default 'claude-code'.
-//   CLEVR_MODE             'shadow' (default) observes and records every verdict
-//                          but NEVER blocks; 'enforce' actually blocks / asks.
+//   CLEVR_MODE             unset (default) OBEYS the engine verdict — the console's
+//                          workspace mode and per-agent mode decide whether an action
+//                          is shadowed or blocked (a new agent observes first). Set
+//                          'shadow' to force THIS machine to record-only, whatever the
+//                          engine returned (a per-developer escape hatch, not the fleet
+//                          control). The console config always prevails.
 //   CLEVR_FORWARD_CONTEXT  '1' (default) forward recent transcript turns; '0' off.
 //   CLEVR_CONTEXT_TURNS    how many recent turns to forward. Default 6. Raise it to
 //                          widen the window the engine scans (catches an injection
@@ -43,7 +47,7 @@ export function loadConfig () {
     base: (process.env.CLEVR_URL || 'http://localhost:8787').replace(/\/$/, ''),
     agent: process.env.CLEVR_AGENT || 'claude-code',
     failsafe: (process.env.CLEVR_FAILSAFE || 'open').toLowerCase(),
-    mode: (process.env.CLEVR_MODE || 'shadow').toLowerCase(),
+    mode: (process.env.CLEVR_MODE || 'enforce').toLowerCase(),
     autoApprove: process.env.CLEVR_AUTO_APPROVE === '1',
     // What a step-up (escalate) does on the tool gate. 'deny' (default) HOLDS the
     // action — a step-up that no one has approved does not run. A Claude Code hook

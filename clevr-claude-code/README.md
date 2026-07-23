@@ -16,7 +16,7 @@ Each action is mapped onto Claude Code's own permission model:
 
 Every decision is sealed into Clevr's signed, offline-verifiable audit chain, and each action is situated in its session with the surrounding conversation, so a block reads as "this agent, in this session, on this conversation, tried X, and here is why it was stopped."
 
-By default the plugin runs in **shadow mode**: it evaluates and records every verdict but never blocks, so installing it cannot brick Claude Code. Switch to `CLEVR_MODE=enforce` when you are ready to actually block.
+By default the plugin **obeys the engine**: the console decides whether each action is shadowed or blocked (the workspace mode, or per agent), and a **new agent observes first** (watched and signed, only the safety floor blocks) until you promote it to enforce in the console. Installing it cannot brick Claude Code, and you steer the whole fleet from one place. Set `CLEVR_MODE=shadow` to force record-only on a single machine, whatever the engine returned.
 
 ## Install
 
@@ -54,7 +54,7 @@ export CLEVR_URL=https://your-clevr-host      # default http://localhost:8787
 |---|---|---|
 | `CLEVR_API_KEY` | (required) | Org key. If unset, the gate is inactive (allows everything) so it never bricks Claude Code. |
 | `CLEVR_URL` | `http://localhost:8787` | Engine base URL. The gate calls `<url>/v1/evaluate`. |
-| `CLEVR_MODE` | `shadow` | `shadow` observes and records every verdict but never blocks. `enforce` blocks and holds. |
+| `CLEVR_MODE` | (unset) | Unset **obeys the engine** (the console decides: shadow or block, per workspace or per agent). `shadow` forces record-only on this machine, whatever the engine returned. |
 | `CLEVR_AGENT` | `claude-code` | Identity recorded in the audit log. |
 | `CLEVR_ESCALATE` | `deny` | What an escalate does under enforce. `deny` holds the action (a step-up no one approved does not run). `ask` prompts the local operator instead. |
 | `CLEVR_FORWARD_CONTEXT` | `1` | Forward the last few transcript turns so the engine scans the prompt and situates the tool call in its session. Set `0` to send only the action. |
@@ -70,7 +70,7 @@ On each hook the plugin POSTs to `<CLEVR_URL>/v1/evaluate`: the action (the tool
 
 ## Rollout
 
-1. **Install in shadow** (the default). Every tool call is evaluated and recorded; nothing is blocked. Watch the decisions in the Clevr console to see what would have been stopped.
+1. **Install and observe** (the console default for a new agent). Every tool call is evaluated and recorded; only the safety floor blocks. Watch the decisions in the Clevr console to see what would be stopped under enforce.
 2. **Authorize the agent.** Clevr default-denies destructive verbs (exec, write, delete) for an agent with no authority profile, so give the `claude-code` agent a profile that permits the tools it legitimately uses. Benign work then passes; policy violations (secret exfiltration, out-of-scope actions) still stop.
 3. **Switch to enforce** with `CLEVR_MODE=enforce`. Blocks and escalations take effect.
 
