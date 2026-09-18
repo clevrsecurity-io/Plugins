@@ -22,7 +22,7 @@
 // a JSON decision on stdout. Exit 0 with no JSON is an additive no-op.
 
 import { readFileSync } from 'node:fs';
-import { trunc, loadConfig, postEvaluate } from './clevr-common.mjs';
+import { trunc, loadConfig, postEvaluate, confirmEnforcement } from './clevr-common.mjs';
 
 // permission ∈ 'allow' | 'deny' | 'ask'. null => print nothing (additive no-op),
 // so Cursor's normal flow proceeds unchanged (used for allow + shadow).
@@ -58,7 +58,7 @@ async function main () {
   let hook = {};
   try { hook = JSON.parse(readFileSync(0, 'utf8')); } catch { out(null); }
 
-  const cfg = loadConfig();
+  const cfg = loadConfig('cursor');
   if (!cfg.apiKey) {
     process.stderr.write('[clevr] CLEVR_API_KEY not set; hook inactive (allowing). Set it to enforce.\n');
     out(null);
@@ -76,11 +76,15 @@ async function main () {
     session_id: hook.conversation_id || null,
     // Surface the tool's arguments as target_attr so deterministic argument rules
     // (target.<name>, e.g. target.amount > 10000) can gate on them — mirrors the SDK.
-    target_attr: (toolInput && typeof toolInput === 'object' && !Array.isArray(toolInput)) ? toolInput : null,
-    metadata: { input: toolInput, cwd: hook.cwd || null, source: 'cursor', cursor_version: hook.cursor_version || null },
+    // Sensitive mode: send ONLY the shape — omit the tool arguments and raw input.
+    target_attr: cfg.sensitive ? null : ((toolInput && typeof toolInput === 'object' && !Array.isArray(toolInput)) ? toolInput : null),
+    metadata: cfg.sensitive
+      ? { cwd: hook.cwd || null, source: 'cursor', cursor_version: hook.cursor_version || null, sensitive: true }
+      : { input: toolInput, cwd: hook.cwd || null, source: 'cursor', cursor_version: hook.cursor_version || null },
+    ...(cfg.sensitive ? { sensitive: true } : {}),
   };
   // Minimal context: Cursor hands preToolUse the assistant's current message.
-  if (cfg.forwardCtx && hook.agent_message) {
+  if (!cfg.sensitive && cfg.forwardCtx && hook.agent_message) {
     body.conversation = [{ role: 'assistant', content: trunc(hook.agent_message, 1000) }];
   }
 
@@ -95,7 +99,20 @@ async function main () {
   const v = res.verdict;
   const effect = v.effect;
   const reason = v.reason || '';
-  const tag = v.decision_id ? ` [${v.decision_id}]` : '';
+  const decisionId = v.decision_id || null;
+  const tag = decisionId ? ` [${decisionId}]` : '';
+
+  // Answer Cursor, but FIRST confirm to the engine what the gate actually did — so
+  // the console shows "did not run" only when the gate truly refused it, never
+  // inferred from the verdict. Best-effort; only the ENFORCING outcomes are
+  // confirmed. In shadow mode below the gate returns null (no enforcement) and so
+  // never confirms — the console then honestly reads the block as "not confirmed".
+  const decide = async (permission, enforcedOutcome, msg) => {
+    if (decisionId && enforcedOutcome) {
+      try { await confirmEnforcement(cfg, decisionId, enforcedOutcome); } catch { /* stays unconfirmed */ }
+    }
+    out(permission, msg);
+  };
 
   // Local override: CLEVR_MODE=shadow forces THIS machine to record-only, never
   // blocking, whatever the engine returned (the decision is already sealed
@@ -104,12 +121,20 @@ async function main () {
   // agent observes first, so an install still can't brick Cursor out of the box.
   if (cfg.mode === 'shadow') out(null);
 
-  if (effect === 'block') out('deny', `Clevr blocked this action: ${reason}${tag}`);
+  // A workspace can write its own refusal copy; when it has, that is what its
+  // people are meant to read, so it replaces ours (same rule as the other gates).
+  const tenantMsg = (effect === 'block' ? v.block_message : v.stepup_message) || null;
+  const authority = v.matched_policy === 'role-boundary';
+  if (effect === 'block') return decide('deny', 'denied', tenantMsg ? `${tenantMsg}${tag}` : `Clevr blocked this action: ${reason}${tag}`);
   if (effect === 'escalate' || effect === 'step_up') {
-    if (cfg.escalate === 'ask') out('ask', `Clevr requires human approval: ${reason}${tag}`);
-    out('deny', `Clevr held this action (step-up not approved): ${reason}${tag}`);
+    if (cfg.escalate === 'ask') return decide('ask', 'asked', tenantMsg ? `${tenantMsg}${tag}` : `Clevr requires human approval: ${reason}${tag}`);
+    if (tenantMsg) return decide('deny', 'denied', `${tenantMsg}${tag}`);
+    // An action outside the mandate is an authority outcome, not an approval
+    // nobody answered; saying "step-up not approved" misread the commonest refusal.
+    if (authority) return decide('deny', 'denied', `Clevr did not run this: ${reason} Authorize the tool in the mandate, or have someone approve this action in the console.${tag}`);
+    return decide('deny', 'denied', `Clevr did not run this. It needs a human decision, and this gate answers in seconds so it cannot wait for one: ${reason}${tag}`);
   }
-  if (cfg.autoApprove) out('allow', `Clevr allowed this action${tag}`);
+  if (cfg.autoApprove) out('allow', `Clevr allowed this action${tag}`);  // allow: no enforcement claim to confirm
   out(null);  // additive: let Cursor's normal permission flow proceed
 }
 

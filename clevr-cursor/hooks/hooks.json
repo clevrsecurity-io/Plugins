@@ -1,8 +1,17 @@
 {
   "version": 1,
   "hooks": {
+    "beforeSubmitPrompt": [
+      { "command": "node ~/.cursor/clevr-hooks/clevr-prompt.mjs" }
+    ],
     "preToolUse": [
       { "command": "node ~/.cursor/clevr-hooks/clevr-gate.mjs" }
+    ],
+    "postToolUse": [
+      { "command": "node ~/.cursor/clevr-hooks/clevr-result.mjs" }
+    ],
+    "afterAgentResponse": [
+      { "command": "node ~/.cursor/clevr-hooks/clevr-answer.mjs" }
     ]
   }
 }
