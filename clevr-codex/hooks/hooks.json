@@ -1,10 +1,79 @@
 {
   "hooks": {
-    "SessionStart": [{ "command": "node ~/.clevr/tools/codex/clevr-codex-session.mjs", "timeout": 5 }],
-    "UserPromptSubmit": [{ "command": "node ~/.clevr/tools/codex/clevr-codex-prompt.mjs", "timeout": 10 }],
-    "PreToolUse": [{ "command": "node ~/.clevr/tools/codex/clevr-codex-gate.mjs", "timeout": 10 }],
-    "PostToolUse": [{ "command": "node ~/.clevr/tools/codex/clevr-codex-result.mjs", "timeout": 10 }],
-    "SubagentStart": [{ "command": "node ~/.clevr/tools/codex/clevr-codex-subagent.mjs", "timeout": 10 }],
-    "Stop": [{ "command": "node ~/.clevr/tools/codex/clevr-codex-stop.mjs", "timeout": 10 }]
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ~/.clevr/tools/codex/clevr-codex-session.mjs",
+            "timeout": 5,
+            "statusMessage": "Clevr: session ground rules"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ~/.clevr/tools/codex/clevr-codex-prompt.mjs",
+            "timeout": 10,
+            "statusMessage": "Clevr: scanning the prompt"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ~/.clevr/tools/codex/clevr-codex-gate.mjs",
+            "timeout": 10,
+            "statusMessage": "Clevr: checking the tool call"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ~/.clevr/tools/codex/clevr-codex-result.mjs",
+            "timeout": 10,
+            "statusMessage": "Clevr: scanning the result"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ~/.clevr/tools/codex/clevr-codex-subagent.mjs",
+            "timeout": 10,
+            "statusMessage": "Clevr: recording the sub-agent"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ~/.clevr/tools/codex/clevr-codex-stop.mjs",
+            "timeout": 10,
+            "statusMessage": "Clevr: recording the reply"
+          }
+        ]
+      }
+    ]
   }
 }

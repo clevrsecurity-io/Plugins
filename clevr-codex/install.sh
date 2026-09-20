@@ -39,13 +39,18 @@ const file = process.env.HOOKS_JSON, dir = process.env.TOOLS_DIR;
 let h = {}; try { h = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { h = {}; }
 h.hooks = h.hooks || {};
 const ours = (x) => /clevr-codex-/.test(JSON.stringify(x || ''));
-for (const [event, f, timeout] of [
-  ['SessionStart', 'clevr-codex-session.mjs', 5], ['UserPromptSubmit', 'clevr-codex-prompt.mjs', 10],
-  ['PreToolUse', 'clevr-codex-gate.mjs', 10], ['PostToolUse', 'clevr-codex-result.mjs', 10],
-  ['SubagentStart', 'clevr-codex-subagent.mjs', 10], ['Stop', 'clevr-codex-stop.mjs', 10],
+// The documented shape: an event maps to entries, each with an optional matcher
+// and a `hooks` array of command handlers. A flat {command} is silently ignored.
+for (const [event, f, timeout, matcher, statusMessage] of [
+  ['SessionStart', 'clevr-codex-session.mjs', 5, 'startup|resume|clear', 'Clevr: session ground rules'],
+  ['UserPromptSubmit', 'clevr-codex-prompt.mjs', 10, null, 'Clevr: scanning the prompt'],
+  ['PreToolUse', 'clevr-codex-gate.mjs', 10, '.*', 'Clevr: checking the tool call'],
+  ['PostToolUse', 'clevr-codex-result.mjs', 10, '.*', 'Clevr: scanning the result'],
+  ['SubagentStart', 'clevr-codex-subagent.mjs', 10, null, 'Clevr: recording the sub-agent'],
+  ['Stop', 'clevr-codex-stop.mjs', 10, null, 'Clevr: recording the reply'],
 ]) {
   h.hooks[event] = (h.hooks[event] || []).filter((x) => !ours(x));
-  h.hooks[event].push({ command: 'node ' + JSON.stringify(dir + '/' + f), timeout });
+  h.hooks[event].push({ ...(matcher ? { matcher } : {}), hooks: [{ type: 'command', command: 'node ' + JSON.stringify(dir + '/' + f), timeout, statusMessage }] });
 }
 fs.writeFileSync(file, JSON.stringify(h, null, 2) + '\n');
 console.log('Registered 6 hooks in ' + file + ' (your own hooks kept)');
@@ -59,6 +64,13 @@ shell profile (~/.zprofile), or launch it from a shell that has them exported:
 
   export CLEVR_URL=https://your-clevr-host
   export CLEVR_API_KEY=clevr_sk_...
+
+Then trust the hooks once. Codex skips a hook it has not reviewed, without
+saying so: run `codex` in any folder and answer "Trust all and continue" at
+the "Hooks need review" prompt. It records the six hashes in
+~/.codex/config.toml and asks again only if a hook changes. The ChatGPT
+desktop app has no review screen; that one answer covers it too, both read
+the same file.
 
 Restart Codex or the ChatGPT desktop app. Every prompt, tool call, tool result
 and reply is evaluated, recorded and signed. A new agent observes first, the
