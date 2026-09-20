@@ -105,6 +105,11 @@ export function loadConfig (defaultAgent = 'claude-code') {
     // divergent copy of this whole file; one parameter was all that copy was
     // actually for.
     agent: process.env.CLEVR_AGENT || defaultAgent,
+    // The harness these hooks run inside, as recorded on every decision
+    // (metadata.source). Claude Code by default; Codex runs the same hook
+    // contract and sets CLEVR_SOURCE=codex through its shims, so the console
+    // names the right harness instead of filing Codex traffic under Claude Code.
+    source: process.env.CLEVR_SOURCE || (defaultAgent === 'claude-code' ? 'claude-code' : defaultAgent),
     // Read by the Cursor gate: 'shadow' forces THIS machine to record-only even
     // when the engine returns a blocking verdict. Everything else obeys the
     // engine, which is where the tenant's mode already lives.

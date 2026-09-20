@@ -85,7 +85,7 @@ async function main () {
     session_id: session_id || null,
     session_goal: firstUser ? trunc(firstUser.content, 300) : null,
     conversation,                    // the prompt itself — scanned by the content floor
-    metadata: { cwd, source: 'claude-code', event: 'user-prompt' },
+    metadata: { cwd, source: cfg.source, event: 'user-prompt' },
   };
 
   const res = await postEvaluate(cfg, body);

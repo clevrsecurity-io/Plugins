@@ -39,7 +39,7 @@ async function main () {
       { type: 'agent', id: cfg.agent, display: cfg.agent },
       { type: 'agent', id: subName, display: subName, on_behalf_of: cfg.agent, harness_agent_id: agent_id || null, identity: 'asserted' },
     ],
-    metadata: { source: 'claude-code', event: 'subagent_start', agent_id: agent_id || null, agent_type: agent_type || null, task: trunc(task || '', 300) },
+    metadata: { source: cfg.source, event: 'subagent_start', agent_id: agent_id || null, agent_type: agent_type || null, task: trunc(task || '', 300) },
   };
   // The sub-agent's instruction becomes the session goal for the lineage.
   if (task) body.session_goal = trunc(task, 300);

@@ -45,6 +45,22 @@ cd Plugins/clevr-cursor && ./install.sh
 Then export `CLEVR_URL` and `CLEVR_API_KEY` where Cursor is launched. Full
 setup in [clevr-cursor/README.md](clevr-cursor/README.md).
 
+## clevr-codex
+
+Govern Codex, and the ChatGPT desktop app, which runs the same Codex locally.
+Six hooks, the same six as Claude Code: the prompt, every tool call before it
+runs, every tool result, sub-agents, the reply, and the ground rules at session
+start. The hooks are shims over the Claude Code ones, so there is one
+implementation.
+
+```
+git clone https://github.com/clevrsecurity-io/Plugins
+cd Plugins/clevr-codex && ./install.sh
+```
+
+Then export `CLEVR_URL` and `CLEVR_API_KEY` where Codex runs. Full setup in
+[clevr-codex/README.md](clevr-codex/README.md).
+
 ## clevr-mcp-guard
 
 For any MCP host with no per-tool hook (Claude Desktop connectors, GitHub

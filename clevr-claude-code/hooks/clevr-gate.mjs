@@ -107,8 +107,8 @@ async function main () {
     // tool_input so a confidential payload never leaves this machine.
     target_attr: cfg.sensitive ? null : ((tool_input && typeof tool_input === 'object' && !Array.isArray(tool_input)) ? tool_input : null),
     metadata: cfg.sensitive
-      ? { cwd, source: 'claude-code', agent_id: agent_id || null, agent_type: agent_type || null, sensitive: true }
-      : { input: tool_input, cwd, source: 'claude-code', agent_id: agent_id || null, agent_type: agent_type || null },
+      ? { cwd, source: cfg.source, agent_id: agent_id || null, agent_type: agent_type || null, sensitive: true }
+      : { input: tool_input, cwd, source: cfg.source, agent_id: agent_id || null, agent_type: agent_type || null },
     ...(cfg.sensitive ? { sensitive: true } : {}),
   };
   if (!cfg.sensitive && cfg.forwardCtx && transcript_path) {

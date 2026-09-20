@@ -120,7 +120,7 @@ async function main () {
     session_id: session_id || null,
     actor_chain: actorChain,
     conversation,
-    metadata: { cwd, source: 'claude-code', event: 'tool-result', tool_use_id: tool_use_id || null, agent_id: agent_id || null, agent_type: agent_type || null },
+    metadata: { cwd, source: cfg.source, event: 'tool-result', tool_use_id: tool_use_id || null, agent_id: agent_id || null, agent_type: agent_type || null },
   });
 
   if (res.inactive || res.failopen || res.failclosed) quiet();   // a result scan never fails the turn

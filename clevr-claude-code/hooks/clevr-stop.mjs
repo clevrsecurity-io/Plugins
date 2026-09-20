@@ -60,7 +60,7 @@ async function main () {
     answer: reply.content,
     sessionId: session_id || null,
     cwd: hook.cwd || null,
-    source: 'claude-code',
+    source: cfg.source,
   });
   body.metadata.event = 'assistant-reply';
   if (prompt) {
