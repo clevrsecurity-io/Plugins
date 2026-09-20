@@ -75,9 +75,14 @@ export CLEVR_API_KEY=clevr_sk_...
 export CLEVR_URL=https://your-clevr-host      # default http://localhost:8787
 ```
 
+When the environment carries no key, the hooks read `~/.clevr/config.json`,
+the file `clevr login` writes. That is the source an app launched from the
+Dock gets (Claude Desktop's Cowork sessions, the ChatGPT desktop app), since
+it starts with no shell environment at all. An exported key still wins.
+
 | Variable | Default | Meaning |
 |---|---|---|
-| `CLEVR_API_KEY` | (required) | Org key. If unset, the gate is inactive (allows everything) so it never bricks Claude Code. |
+| `CLEVR_API_KEY` | (required) | Org key; read from `~/.clevr/config.json` when unset. With neither, the gate is inactive (allows everything) so it never bricks Claude Code. |
 | `CLEVR_URL` | `http://localhost:8787` | Engine base URL. The gate calls `<url>/v1/evaluate`. |
 | `CLEVR_AGENT` | `claude-code` | Identity recorded in the audit log. |
 | `CLEVR_ESCALATE` | `deny` | What a Hold does on the tool gate: `deny` refuses the action (nothing runs that nobody approved); `allow` lets it through and records that this machine did. There is no option to ask the person at the keyboard: approving your own hold empties the control. |

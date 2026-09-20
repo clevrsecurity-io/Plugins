@@ -12,7 +12,7 @@ const require_ = createRequire(import.meta.url)
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { tmpdir, userInfo, hostname } from 'node:os';
+import { tmpdir, userInfo, hostname, homedir } from 'node:os';
 import { join } from 'node:path';
 import http from 'node:http';
 import https from 'node:https';
@@ -97,10 +97,24 @@ export function actsFor (cwd) {
   return _actsFor;
 }
 
+// The engine and key come from the environment, and a GUI app (the ChatGPT
+// desktop app, Claude Desktop, an IDE opened from the Dock) is launched with
+// none of it. Measured: hooks installed and trusted, and every one of them
+// silent under the app because CLEVR_API_KEY was empty there. So the file
+// `clevr setup` writes is the second source. The environment still wins when
+// it is set, and a hook with neither stays silent as before.
+function fileConfig () {
+  try {
+    const c = JSON.parse(readFileSync(join(homedir(), '.clevr', 'config.json'), 'utf8'));
+    return { url: typeof c.url === 'string' ? c.url : '', key: typeof c.key === 'string' ? c.key : '' };
+  } catch { return { url: '', key: '' }; }
+}
+
 export function loadConfig (defaultAgent = 'claude-code') {
+  const file = process.env.CLEVR_API_KEY ? { url: '', key: '' } : fileConfig();
   return {
-    apiKey: process.env.CLEVR_API_KEY || '',
-    base: (process.env.CLEVR_URL || 'http://localhost:8787').replace(/\/$/, ''),
+    apiKey: process.env.CLEVR_API_KEY || file.key || '',
+    base: (process.env.CLEVR_URL || file.url || 'http://localhost:8787').replace(/\/$/, ''),
     // The caller names its own harness. Cursor used to get this from a second,
     // divergent copy of this whole file; one parameter was all that copy was
     // actually for.

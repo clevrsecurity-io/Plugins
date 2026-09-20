@@ -27,10 +27,11 @@ clevr setup codex
 
 Writes the hooks to `~/.clevr/tools/codex` (beside the Claude Code hooks they
 hand over to) and registers them in `~/.codex/hooks.json`, leaving your own
-hooks alone. Then export `CLEVR_URL` and `CLEVR_API_KEY` where Codex runs. The
-ChatGPT desktop app inherits the environment it was launched with, so put them
-in your login shell profile, or launch it from a shell that has sourced
-`~/.clevr/env.sh`.
+hooks alone. The hooks read `CLEVR_URL` and `CLEVR_API_KEY` from the
+environment, and from `~/.clevr/config.json` (what `clevr login` writes) when
+the environment has none. That second source is what the ChatGPT desktop app
+gets: launched from the Dock, it carries no shell environment at all, and a
+hook with no key stays silent.
 
 ## Trust the hooks once
 

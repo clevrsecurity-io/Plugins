@@ -58,12 +58,13 @@ JS
 
 cat <<'ENV'
 
-Next, make these visible to the environment Codex runs in. The ChatGPT desktop
-app inherits the environment it was launched with, so put them in your login
-shell profile (~/.zprofile), or launch it from a shell that has them exported:
+Next, give the hooks an engine. They read CLEVR_URL and CLEVR_API_KEY from
+the environment, and from ~/.clevr/config.json when the environment has none,
+which is what the ChatGPT desktop app gets when launched from the Dock:
 
-  export CLEVR_URL=https://your-clevr-host
+  export CLEVR_URL=https://your-clevr-host          # a shell
   export CLEVR_API_KEY=clevr_sk_...
+  clevr login                                       # or the file, for every app
 
 Then trust the hooks once. Codex skips a hook it has not reviewed, without
 saying so: run `codex` in any folder and answer "Trust all and continue" at

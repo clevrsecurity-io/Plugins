@@ -10,7 +10,7 @@
       "name": "clevr-gate",
       "source": "./clevr-claude-code",
       "description": "Govern Claude Code through Clevr's runtime policy engine: every tool call, prompt, tool result and reply, with a signed receipt. /clevr-gate:status says where you stand.",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "author": {
         "name": "Clevr Security"
       },
