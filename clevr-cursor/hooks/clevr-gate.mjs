@@ -9,7 +9,7 @@
 //   allow    -> proceed  (additive: Cursor's own confirmations still apply,
 //                          unless CLEVR_AUTO_APPROVE=1 makes Clevr the sole gate)
 //   escalate -> deny/hold (a synchronous hook cannot wait for an async console
-//                          approval; CLEVR_ESCALATE=ask prompts the LOCAL operator)
+//                          approval; CLEVR_ESCALATE=allow lets it through, recorded)
 //   block    -> deny     (the tool never runs; the model sees the reason)
 //
 // This gates the Cursor Agent's ACTIONS even though its model is locked to
@@ -22,7 +22,7 @@
 // a JSON decision on stdout. Exit 0 with no JSON is an additive no-op.
 
 import { readFileSync } from 'node:fs';
-import { trunc, loadConfig, postEvaluate, confirmEnforcement } from './clevr-common.mjs';
+import { trunc, loadConfig, postEvaluate, confirmEnforcement, actsFor } from './clevr-common.mjs';
 
 // permission ∈ 'allow' | 'deny' | 'ask'. null => print nothing (additive no-op),
 // so Cursor's normal flow proceeds unchanged (used for allow + shadow).
@@ -74,6 +74,10 @@ async function main () {
     agent: cfg.agent, tool: toolName, action_type, action, target,
     environment: cfg.env,
     session_id: hook.conversation_id || null,
+    // The person this run is acting for, asserted by the machine. Unverified by
+    // construction: the engine lets an asserted identity narrow what a rule
+    // grants, never widen it. The key's owner outranks it server side.
+    on_behalf_of: actsFor(hook.cwd),
     // Surface the tool's arguments as target_attr so deterministic argument rules
     // (target.<name>, e.g. target.amount > 10000) can gate on them — mirrors the SDK.
     // Sensitive mode: send ONLY the shape — omit the tool arguments and raw input.
@@ -127,7 +131,13 @@ async function main () {
   const authority = v.matched_policy === 'role-boundary';
   if (effect === 'block') return decide('deny', 'denied', tenantMsg ? `${tenantMsg}${tag}` : `Clevr blocked this action: ${reason}${tag}`);
   if (effect === 'escalate' || effect === 'step_up') {
-    if (cfg.escalate === 'ask') return decide('ask', 'asked', tenantMsg ? `${tenantMsg}${tag}` : `Clevr requires human approval: ${reason}${tag}`);
+    // A hold means a PERSON decides, in the console or from Slack or Teams.
+    // It never means asking the developer sitting here: approving your own hold
+    // empties the control. This gate answers in seconds and cannot wait for an
+    // asynchronous approval, so where the wait is impossible the action is
+    // refused and the person is told how to unblock it. CLEVR_ESCALATE=allow is
+    // the one documented way out, named the same in every harness.
+    if (cfg.escalate === 'allow') return decide(null, 'allowed', null);
     if (tenantMsg) return decide('deny', 'denied', `${tenantMsg}${tag}`);
     // An action outside the mandate is an authority outcome, not an approval
     // nobody answered; saying "step-up not approved" misread the commonest refusal.

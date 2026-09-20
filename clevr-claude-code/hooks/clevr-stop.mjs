@@ -12,13 +12,16 @@
 // output visible in the Clevr conversation + audit and flags a leak for review.
 // Blocking the output BEFORE it is shown is the gateway's job (PROXY mode).
 //
-// Why the reply rides in `conversation`: same trick as clevr-prompt.mjs — the
-// content detectors scan the conversation (the assistant_text segment), while the
-// verb safety-floor classifies only `action`, so the reply is fully scanned
-// without misfiring the verb banks on ordinary words.
+// Why the reply rides as an egress `output` and not in `conversation`: the
+// engine's response-side floor reads the model's own words from the egress
+// channel (what the gateway and the Gemini and Cursor answer hooks send). The
+// assistant turn of a conversation is context for the OTHER channels and is not
+// itself scanned, so a reply that echoed a national id back went through here
+// as allow while the same text on the egress channel is held. Measured, then
+// changed: this hook now sends what the answer hooks send.
 
 import { readFileSync } from 'node:fs';
-import { trunc, loadConfig, readConversation, postEvaluate } from './clevr-common.mjs';
+import { trunc, loadConfig, readConversation, postEvaluate, answerBody } from './clevr-common.mjs';
 
 // Record-only: always let the turn finish. We never emit a `decision`, so the
 // model is never forced to continue.
@@ -29,7 +32,7 @@ async function main () {
   try { hook = JSON.parse(readFileSync(0, 'utf8')); } catch { done(); }
 
   const cfg = loadConfig();
-  if (!cfg.apiKey) done();
+  if (!cfg.apiKey || cfg.sensitive) done();   // a reply is content; sensitive mode keeps it here
 
   const { session_id, transcript_path } = hook;
   if (!transcript_path) done();
@@ -48,19 +51,22 @@ async function main () {
   for (let i = replyIdx - 1; i >= 0; i--) {
     if (window[i].role === 'user') { prompt = window[i]; break; }
   }
-  const conversation = [prompt, reply].filter(Boolean);
-
-  const body = {
-    agent: cfg.agent,
-    action_type: 'completion',       // the model's output, not a verb-classified action
-    action: 'assistant reply',       // neutral: keeps the verb safety-floor off the prose
-    target: null,
-    environment: cfg.env,
-    session_id: session_id || null,
-    session_goal: prompt ? trunc(prompt.content, 300) : null,
-    conversation,                    // the assistant_text is scanned by the content floor
-    metadata: { source: 'claude-code', event: 'assistant-reply' },
-  };
+  // The reply is the subject and goes on the egress channel, whole (capped high).
+  // The prompt that led to it rides along as context, so the record reads as an
+  // exchange rather than a bare answer. No system prompt: Claude Code does not
+  // hand a Stop hook one, so the prompt-leak check cannot run here and the body
+  // says so by omission rather than comparing against nothing.
+  const body = answerBody(cfg, {
+    answer: reply.content,
+    sessionId: session_id || null,
+    cwd: hook.cwd || null,
+    source: 'claude-code',
+  });
+  body.metadata.event = 'assistant-reply';
+  if (prompt) {
+    body.session_goal = trunc(prompt.content, 300);
+    body.conversation = [prompt, reply];
+  }
 
   // Record + scan. We never block (the reply is already shown); the verdict lives
   // in the Clevr audit, where a flagged reply (e.g. a leaked secret) surfaces for

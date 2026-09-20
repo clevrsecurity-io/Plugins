@@ -1,5 +1,27 @@
 {
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/clevr-session.mjs\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/clevr-prompt.mjs\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "*",
@@ -12,12 +34,13 @@
         ]
       }
     ],
-    "UserPromptSubmit": [
+    "PostToolUse": [
       {
+        "matcher": "*",
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/clevr-prompt.mjs\"",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/clevr-result.mjs\"",
             "timeout": 10
           }
         ]

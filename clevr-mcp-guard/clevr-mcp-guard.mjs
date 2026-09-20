@@ -47,6 +47,16 @@ const CFG = {
   failClosed: process.env.CLEVR_FAILSAFE === 'closed',
   timeoutMs: Number(process.env.CLEVR_TIMEOUT_MS || 8000),
 }
+
+// One fail policy the whole guard obeys. Learned from the brain's verdicts
+// (verdict.failsafe = the workspace default or this agent's override) and applied
+// the moment the brain is unreachable. Before the first verdict, fall back to the
+// CLEVR_FAILSAFE bootstrap. This is what makes every surface behave identically.
+let cachedFailsafe = null
+// Seeded once at startup from the workspace (below), so even before the first
+// verdict the guard follows the workspace choice rather than the CLEVR_FAILSAFE env.
+let workspaceFailsafe = null
+const effectiveFailsafe = () => cachedFailsafe || workspaceFailsafe || (CFG.failClosed ? 'closed' : 'open')
 const active = !!(CFG.url && CFG.key)
 if (!active) process.stderr.write('[clevr-mcp-guard] CLEVR_URL/CLEVR_API_KEY not set; passing through UNGOVERNED.\n')
 
@@ -94,6 +104,38 @@ function httpPostJson (urlStr, { headers = {}, body = '', timeoutMs = 8000 } = {
   })
 }
 
+// One-shot GET (same one-shot-socket pattern as httpPostJson) for the startup
+// seed of the workspace fail policy.
+function httpGetJson (urlStr, { headers = {}, timeoutMs = 5000 } = {}) {
+  return new Promise((resolve, reject) => {
+    let url
+    try { url = new URL(urlStr) } catch (e) { reject(e); return }
+    const mod = url.protocol === 'https:' ? https : http
+    const req = mod.request(url, { method: 'GET', agent: false, headers }, (res) => {
+      let data = ''
+      res.setEncoding('utf8')
+      res.on('data', (c) => { data += c })
+      res.on('end', () => resolve({ status: res.statusCode || 0, body: data }))
+    })
+    req.on('error', reject)
+    req.setTimeout(timeoutMs, () => req.destroy(new Error('timeout')))
+    req.end()
+  })
+}
+
+// Seed the offline default from the workspace at startup (best-effort). If the
+// brain is unreachable now, the CLEVR_FAILSAFE bootstrap stands until the first
+// verdict corrects the cache.
+;(async () => {
+  try {
+    const r = await httpGetJson(`${CFG.url}/v1/failsafe`, { headers: { Authorization: `Bearer ${CFG.key}` } })
+    if (r.status >= 200 && r.status < 300) {
+      const j = JSON.parse(r.body)
+      if (j && (j.failsafe_action === 'open' || j.failsafe_action === 'closed')) workspaceFailsafe = j.failsafe_action
+    }
+  } catch { /* brain unreachable at boot; bootstrap stands */ }
+})()
+
 // Ask the engine about one tools/call. Returns {effect, reason, decision_id}.
 async function evaluate (name, args) {
   try {
@@ -118,6 +160,19 @@ async function evaluate (name, args) {
   }
 }
 
+// Tell the engine what this guard DID with a verdict ('denied' | 'allowed'), so
+// the console reads "did not run" only when the guard truly refused the call,
+// never inferred from the verdict alone. Best-effort, short timeout, never
+// delays the answer to the host: the deny is sent first, this follows.
+function confirmEnforcement (decisionId, enforced) {
+  if (!active || !decisionId) return
+  httpPostJson(`${CFG.url}/v1/decisions/${encodeURIComponent(decisionId)}/enforcement`, {
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${CFG.key}` },
+    body: JSON.stringify({ enforced }),
+    timeoutMs: Math.min(CFG.timeoutMs, 2000),
+  }).catch(() => { /* stays unconfirmed; the console does not overclaim */ })
+}
+
 // A JSON-RPC result that tells the host the tool was denied, WITHOUT running it.
 // isError:true is the MCP convention for a tool-level failure the model sees.
 function denyResult (id, reason, decisionId) {
@@ -126,6 +181,7 @@ function denyResult (id, reason, decisionId) {
     jsonrpc: '2.0', id,
     result: { isError: true, content: [{ type: 'text', text: `Blocked by Clevr: ${reason || 'policy'}${tag}` }] },
   })
+  confirmEnforcement(decisionId, 'denied')
 }
 
 // Host -> upstream: intercept tools/call, pass everything else through. We pump
@@ -154,14 +210,19 @@ async function handle (line) {
   const v = await evaluate(name, args)
 
   if (v.error) {
-    // Engine unreachable: fail-open (forward) unless CLEVR_FAILSAFE=closed.
-    if (CFG.failClosed) return denyResult(msg.id, `engine unreachable (${v.error})`, null)
-    process.stderr.write(`[clevr-mcp-guard] engine error (${v.error}); forwarding (fail-open).\n`)
+    // Engine unreachable → the agent's cached fail policy (workspace default or
+    // per-agent override), else the CLEVR_FAILSAFE bootstrap. closed=deny, open=forward.
+    if (effectiveFailsafe() === 'closed') return denyResult(msg.id, `engine unreachable (${v.error})`, null)
+    process.stderr.write(`[clevr-mcp-guard] engine error (${v.error}); forwarding (fail-open per policy).\n`)
     return forward(line)
   }
+  if (v.failsafe === 'open' || v.failsafe === 'closed') cachedFailsafe = v.failsafe
   const effect = v.effect
   const blocked = effect === 'block' || effect === 'escalate' || effect === 'step_up'
   if (blocked && !CFG.shadow) return denyResult(msg.id, v.reason, v.decision_id)
+  // A blocking verdict this machine let through (shadow) is an allow it chose:
+  // confirm it, so the console shows the call ran rather than "not confirmed".
+  if (blocked) confirmEnforcement(v.decision_id, 'allowed')
   // allow, log, or shadow (record-only): the decision is already sealed; run it.
   return forward(line)
 }

@@ -1,4 +1,6 @@
 // clevr-common.mjs — shared helpers for the Clevr Claude Code hooks.
+import { createRequire } from 'node:module'
+const require_ = createRequire(import.meta.url)
 //
 // Two hooks gate Claude Code through one engine:
 //   clevr-gate.mjs    PreToolUse      — every tool call (Bash / Edit / WebFetch / MCP ...)
@@ -9,7 +11,8 @@
 // Code runs.
 
 import { readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { execFileSync } from 'node:child_process';
+import { tmpdir, userInfo, hostname } from 'node:os';
 import { join } from 'node:path';
 import http from 'node:http';
 import https from 'node:https';
@@ -59,6 +62,41 @@ export function trunc (s, n = 300) {
 //                          'closed' to deny. Unset key always allows.
 //   CLEVR_TIMEOUT_MS       evaluate timeout. Default 4000.
 //   CLEVR_ENV              environment label sent to the engine (prod/staging/dev).
+
+// WHO this run is acting for.
+//
+// A harness sends the name of a piece of software, never a person, which is why
+// 8 decisions in 40 000 carry a verified one. The key that the plugin holds
+// answers it best, and the engine reads the key's owner on its side. This is the
+// client half: what the machine itself already knows about who is sitting at it.
+//
+// Order: an explicit setting, then the email the developer configured in git
+// (the identity they already maintain, and the one that resolves against a
+// directory), then the OS account and host as a last resort so the field is
+// never empty on a shared workstation.
+//
+// It is an ASSERTION and the engine treats it as one: an unverified person can
+// narrow what a rule grants, never widen it (business_rules.js). So this makes
+// actions attributable without making them authorised.
+let _actsFor;
+export function actsFor (cwd) {
+  if (_actsFor !== undefined) return _actsFor;
+  const explicit = String(process.env.CLEVR_ON_BEHALF_OF || process.env.CLEVR_USER || '').trim();
+  if (explicit) { _actsFor = explicit; return _actsFor; }
+  try {
+    const email = execFileSync('git', ['config', '--get', 'user.email'], {
+      cwd: cwd || process.cwd(), encoding: 'utf8', timeout: 800, stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    if (email && email.includes('@')) { _actsFor = email; return _actsFor; }
+  } catch { /* no git, no repo, no config — fall through */ }
+  try {
+    const u = userInfo().username;
+    if (u) { _actsFor = `${u}@${hostname()}`; return _actsFor; }
+  } catch { /* nothing to say */ }
+  _actsFor = null;
+  return _actsFor;
+}
+
 export function loadConfig (defaultAgent = 'claude-code') {
   return {
     apiKey: process.env.CLEVR_API_KEY || '',
@@ -73,12 +111,16 @@ export function loadConfig (defaultAgent = 'claude-code') {
     mode: (process.env.CLEVR_MODE || 'enforce').toLowerCase(),
     failsafe: (process.env.CLEVR_FAILSAFE || 'open').toLowerCase(),
     autoApprove: process.env.CLEVR_AUTO_APPROVE === '1',
-    // What a step-up (escalate) does on the tool gate. 'deny' (default) HOLDS the
-    // action — a step-up that no one has approved does not run. A Claude Code hook
-    // is synchronous (must answer in seconds), so it cannot wait for an async
-    // console approval; 'deny' is the honest hard gate. 'ask' instead prompts the
-    // LOCAL operator (single-operator setups) — note that is a local approval, not
-    // the console one. True approve-in-console-then-resume is the gateway's job.
+    // What a HOLD does on the tool gate, and it is the same answer in every
+    // harness. 'deny' (default): the action does not run and the person is told
+    // to approve it in Clevr, or from Slack or Teams, and run it again. These
+    // gates answer in seconds and cannot wait for an approval that arrives
+    // minutes later, so where the wait is impossible the action is refused.
+    // 'allow' is the one documented way out.
+    //
+    // There is deliberately NO option to ask the developer sitting here.
+    // Approving your own hold empties the control, and it used to exist in three
+    // gates under two different names.
     escalate: (process.env.CLEVR_ESCALATE || 'deny').toLowerCase(),
     forwardCtx: process.env.CLEVR_FORWARD_CONTEXT !== '0',
     contextTurns: Math.max(1, Number(process.env.CLEVR_CONTEXT_TURNS) || 6),
@@ -171,6 +213,29 @@ function httpPostJson (urlStr, { headers = {}, body = '', timeoutMs = 4000 } = {
     req.on('error', reject);
     req.setTimeout(timeoutMs, () => req.destroy(new Error(`timeout after ${timeoutMs}ms`)));
     req.end(payload);
+  });
+}
+
+// One-shot GET, same socket discipline as the POST above, for the status
+// command: it reads the engine, the workspace posture and the agent record and
+// exits, so a pooled socket would be one more thing for process.exit to race.
+export function httpGetJson (urlStr, { headers = {}, timeoutMs = 3000 } = {}) {
+  return new Promise((resolve, reject) => {
+    let url;
+    try { url = new URL(urlStr); } catch (e) { reject(e); return; }
+    const mod = url.protocol === 'https:' ? https : http;
+    const req = mod.request(url, { method: 'GET', agent: false, headers }, (res) => {
+      let data = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { data += c; });
+      res.on('end', () => {
+        let body = null; try { body = JSON.parse(data); } catch { body = null; }
+        resolve({ status: res.statusCode || 0, body });
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(timeoutMs, () => req.destroy(new Error(`timeout after ${timeoutMs}ms`)));
+    req.end();
   });
 }
 
@@ -316,4 +381,46 @@ export function flattenResult (raw) {
     if (typeof raw[k] === 'string' && raw[k]) return raw[k];
   }
   try { return JSON.stringify(raw); } catch { return ''; }
+}
+
+
+// Where this machine is working, for the brain's environment classifier
+// (lib/environment.js): current branch and remote, kube context, cloud profile.
+// Read cheaply and never blocking: git with a short timeout, the kube config
+// file's current-context line, environment variables. Everything is best-effort
+// and the brain treats it as corroboration, never as the agent's word.
+export function machineContext (cwd) {
+  const ctx = {}
+  try {
+    const { execFileSync } = require_('node:child_process')
+    const opts = { cwd: cwd || process.cwd(), timeout: 700, stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8', windowsHide: true }
+    try { ctx.git_branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], opts).trim() || undefined } catch {}
+    try { ctx.git_remote = execFileSync('git', ['remote', 'get-url', 'origin'], opts).trim() || undefined } catch {}
+  } catch {}
+  try {
+    const fs = require_('node:fs'); const os = require_('node:os'); const path = require_('node:path')
+    const kube = process.env.KUBECONFIG ? process.env.KUBECONFIG.split(path.delimiter)[0] : path.join(os.homedir(), '.kube', 'config')
+    const m = fs.readFileSync(kube, 'utf8').match(/^current-context:\s*["']?([^"'\n]+)/m)
+    if (m) ctx.kube_context = m[1].trim()
+  } catch {}
+  const cloud = process.env.AWS_PROFILE || process.env.CLOUDSDK_CORE_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || process.env.AZURE_SUBSCRIPTION_ID || null
+  if (cloud) ctx.cloud_profile = cloud
+  if (process.env.AWS_ACCOUNT_ID) ctx.cloud_account = process.env.AWS_ACCOUNT_ID
+  if (cwd) ctx.cwd = cwd
+  return Object.keys(ctx).length ? ctx : null
+}
+
+
+// Ticket references the work is carrying, for rules that need proof (approval
+// by evidence): the current branch name (OPS-4471-fix-login) and, for a shell
+// command, the command text (git commit -m "OPS-4471 ..."). The brain verifies
+// them against the source; naming one grants nothing by itself.
+export function evidenceRefs (context, toolInput) {
+  const texts = [context?.git_branch || '']
+  if (toolInput && typeof toolInput === 'object') {
+    for (const k of ['command', 'message', 'title', 'body', 'branch']) if (typeof toolInput[k] === 'string') texts.push(toolInput[k].slice(0, 2000))
+  }
+  const out = new Set()
+  for (const t of texts) for (const m of String(t).matchAll(/\b([A-Z][A-Z0-9_]{1,15}-\d{1,8})\b/g)) out.add(m[1])
+  return [...out].slice(0, 5).map((ref) => ({ kind: 'ticket', ref }))
 }

@@ -21,7 +21,7 @@
 // clevr-common.mjs for the full CLEVR_* list.
 
 import { readFileSync } from 'node:fs';
-import { trunc, loadConfig, readConversation, postEvaluate } from './clevr-common.mjs';
+import { trunc, loadConfig, readConversation, postEvaluate, confirmEnforcement, machineContext, evidenceRefs, actsFor } from './clevr-common.mjs';
 
 function out (decision, reason) {
   if (decision) {
@@ -87,16 +87,31 @@ async function main () {
   const body = {
     agent: cfg.agent, tool: tool_name, action_type, action, target,
     environment: cfg.env,
+    // Machine context for the brain's environment classifier (branch, kube
+    // context, cloud profile). Corroboration only; the brain derives the class.
+    context: machineContext(cwd),
+    // Ticket references found on the branch or in the command (see
+    // evidenceRefs): the brain verifies them, they prove nothing on their own.
+    evidence: evidenceRefs(machineContext(cwd), cfg.sensitive ? null : tool_input),
     session_id: session_id || null,
+    // The person this run is acting for, asserted by the machine. Unverified by
+    // construction, which the engine already handles: an asserted identity may
+    // narrow what a rule grants, never widen it.
+    on_behalf_of: actsFor(cwd),
     // Who acted, on whose behalf — the delegation chain the lineage branches on.
     actor_chain: actorChain,
     // Surface the tool's arguments as target_attr so deterministic argument
     // rules (target.<name>, e.g. target.amount > 10000) can gate on them —
     // mirrors the SDK adapters.
-    target_attr: (tool_input && typeof tool_input === 'object' && !Array.isArray(tool_input)) ? tool_input : null,
-    metadata: { input: tool_input, cwd, source: 'claude-code', agent_id: agent_id || null, agent_type: agent_type || null },
+    // Sensitive mode: send ONLY the shape — omit the tool arguments and the raw
+    // tool_input so a confidential payload never leaves this machine.
+    target_attr: cfg.sensitive ? null : ((tool_input && typeof tool_input === 'object' && !Array.isArray(tool_input)) ? tool_input : null),
+    metadata: cfg.sensitive
+      ? { cwd, source: 'claude-code', agent_id: agent_id || null, agent_type: agent_type || null, sensitive: true }
+      : { input: tool_input, cwd, source: 'claude-code', agent_id: agent_id || null, agent_type: agent_type || null },
+    ...(cfg.sensitive ? { sensitive: true } : {}),
   };
-  if (cfg.forwardCtx && transcript_path) {
+  if (!cfg.sensitive && cfg.forwardCtx && transcript_path) {
     const convo = readConversation(transcript_path, cfg.contextTurns);
     if (convo.length) {
       body.conversation = convo;
@@ -116,7 +131,30 @@ async function main () {
 
   const effect = verdict.effect;
   const reason = verdict.reason || '';
-  const tag = verdict.decision_id ? ` [${verdict.decision_id}]` : '';
+  const decisionId = verdict.decision_id || null;
+  const tag = decisionId ? ` [${decisionId}]` : '';
+  // A workspace can write its own refusal copy. When it has, that is what its
+  // people are meant to read, so it replaces ours rather than sitting unused
+  // behind it.
+  const tenantMsg = (effect === 'block' ? verdict.block_message : verdict.stepup_message) || null;
+  // An action outside the mandate is an authority outcome, not a pending
+  // approval that nobody got to. Saying "step-up not approved" made the most
+  // common refusal in the product read like a timeout on a request that was
+  // never made.
+  const authority = verdict.matched_policy === 'role-boundary';
+
+  // Answer Claude Code, but FIRST confirm to the engine what the gate actually
+  // did — so the console can show "did not run" only when the gate truly refused
+  // it, never inferred from the verdict. Best-effort (short timeout, swallowed):
+  // it must never delay or weaken the gate decision. Only the ENFORCING outcomes
+  // (deny / ask) are confirmed; an allow makes no enforcement claim to confirm,
+  // so the common path keeps its single round-trip.
+  const decide = async (permission, enforcedOutcome, msg) => {
+    if (decisionId && enforcedOutcome) {
+      try { await confirmEnforcement(cfg, decisionId, enforcedOutcome); } catch { /* stays unconfirmed */ }
+    }
+    out(permission, msg);
+  };
 
   // The CONSOLE is the single source of truth for enforcement — there is no
   // local mode that can loosen or tighten the verdict. The engine has ALREADY
@@ -127,16 +165,28 @@ async function main () {
   // stands. So the hook simply OBEYS the returned effect. A machine must not be
   // able to self-exempt (that would let the console show "blocked" for an action
   // that actually ran) — set the mode in the console, per agent or workspace.
-  if (effect === 'block') out('deny', `Clevr blocked this action: ${reason}${tag}`);
-  if (effect === 'escalate' || effect === 'step_up') {
-    // A step-up HOLDS the action by default: the hook is synchronous and cannot
-    // wait for an async console approval, so an un-approved step-up must not run
-    // (consistent with the prompt hook). CLEVR_ESCALATE=ask opts into a LOCAL
-    // operator prompt instead. Approve-in-console-then-resume is the gateway path.
-    if (cfg.escalate === 'ask') out('ask', `Clevr requires human approval: ${reason}${tag}`);
-    out('deny', `Clevr held this action (step-up not approved): ${reason}${tag}`);
+  if (effect === 'block') {
+    return decide('deny', 'denied', tenantMsg
+      ? `${tenantMsg}${tag}`
+      : `Clevr blocked this action: ${reason}${tag}`);
   }
-  if (cfg.autoApprove) out('allow', `Clevr allowed this action${tag}`);
+  if (effect === 'escalate' || effect === 'step_up') {
+    // A hold means a PERSON decides, in the console or from Slack or Teams.
+    // It never means asking the developer sitting here: approving your own hold
+    // empties the control. This gate answers in seconds and cannot wait for an
+    // asynchronous approval, so where the wait is impossible the action is
+    // refused and the person is told how to unblock it. CLEVR_ESCALATE=allow is
+    // the one documented way out, named the same in every harness.
+    if (cfg.escalate === 'allow') return decide(null, 'allowed', null);
+    if (tenantMsg) return decide('deny', 'denied', `${tenantMsg}${tag}`);
+    if (authority) {
+      return decide('deny', 'denied',
+        `Clevr did not run this: ${reason} Authorize the tool in the mandate, or have someone approve this action in the console.${tag}`);
+    }
+    return decide('deny', 'denied',
+      `Clevr did not run this. It needs a human decision, and this gate answers in seconds so it cannot wait for one: ${reason}${tag}`);
+  }
+  if (cfg.autoApprove) out('allow', `Clevr allowed this action${tag}`);  // allow: no enforcement claim to confirm
   out(null);  // additive: let Claude Code's normal permission flow proceed
 }
 

@@ -53,6 +53,9 @@ async function main () {
     process.stderr.write('[clevr] CLEVR_API_KEY not set; prompt capture inactive (allowing).\n');
     allow();
   }
+  // Sensitive mode sends only action SHAPES; a prompt is pure content, so it
+  // stays on this machine. The gate still governs the tool calls it leads to.
+  if (cfg.sensitive) allow();
 
   const { prompt = '', session_id, transcript_path, cwd } = hook;
   if (!String(prompt).trim()) allow();   // nothing to scan
@@ -61,7 +64,12 @@ async function main () {
   // transcript may not include it yet at submit time).
   let conversation = [];
   if (cfg.forwardCtx && transcript_path) conversation = readConversation(transcript_path, cfg.contextTurns);
-  const thisTurn = { role: 'user', content: trunc(prompt, 1000) };
+  // The CURRENT prompt is the thing this hook exists to scan (PII / secrets /
+  // injection), so it must be sent WHOLE — truncating it to the history-context
+  // limit (1000) would leave an injection/secret past char 1000 of a long prompt
+  // unscanned. High sanity cap only, to bound a pathological multi-MB paste; real
+  // prompts are far smaller. Prior HISTORY turns stay capped (context/forensics).
+  const thisTurn = { role: 'user', content: trunc(prompt, 32000) };
   const last = conversation[conversation.length - 1];
   if (!last || last.role !== 'user' || last.content !== thisTurn.content) {
     conversation = [...conversation, thisTurn];
@@ -98,8 +106,11 @@ async function main () {
   // verdicts, shadowed and signed server-side; only the hard floor returns
   // `block`). The hook OBEYS the returned effect — no local mode can loosen it.
   // A non-allow verdict holds the prompt (no inline approval for a prompt).
-  if (effect === 'block') block(`Clevr blocked this prompt: ${reason}${tag}`);
-  if (effect === 'escalate' || effect === 'step_up') block(`Clevr held this prompt for human approval: ${reason}${tag}`);
+  const tenantMsg = (effect === 'block' ? verdict.block_message : verdict.stepup_message) || null;
+  if (effect === 'block') block(tenantMsg ? `${tenantMsg}${tag}` : `Clevr blocked this prompt: ${reason}${tag}`);
+  if (effect === 'escalate' || effect === 'step_up') {
+    block(tenantMsg ? `${tenantMsg}${tag}` : `Clevr did not send this prompt. It needs a human decision first: ${reason}${tag}`);
+  }
   allow();
 }
 
