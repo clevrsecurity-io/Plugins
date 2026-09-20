@@ -84,6 +84,7 @@ it starts with no shell environment at all. An exported key still wins.
 |---|---|---|
 | `CLEVR_API_KEY` | (required) | Org key; read from `~/.clevr/config.json` when unset. With neither, the gate is inactive (allows everything) so it never bricks Claude Code. |
 | `CLEVR_URL` | `http://localhost:8787` | Engine base URL. The gate calls `<url>/v1/evaluate`. |
+| `CLEVR_PROMPT_TIMEOUT_MS` | `8000` | How long the prompt hook waits for the engine. Longer than the tool gate's `CLEVR_TIMEOUT_MS` (4000): a prompt is scanned whole. Past it, the prompt follows the workspace: held when the workspace gates prompts and fails closed, let through with a note when the workspace only records them. |
 | `CLEVR_AGENT` | `claude-code` | Identity recorded in the audit log. |
 | `CLEVR_ESCALATE` | `deny` | What a Hold does on the tool gate: `deny` refuses the action (nothing runs that nobody approved); `allow` lets it through and records that this machine did. There is no option to ask the person at the keyboard: approving your own hold empties the control. |
 | `CLEVR_SENSITIVE` | `0` | `1` sends only the action shape to the engine: no prompt, no tool arguments, no tool result, no reply. The tool gate still governs by nature, reach and authority. Use it for a confidential task instead of disabling the plugin. |

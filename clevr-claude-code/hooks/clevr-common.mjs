@@ -10,7 +10,7 @@ const require_ = createRequire(import.meta.url)
 // the two never drift. No dependencies — Node is already present wherever Claude
 // Code runs.
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, openSync, readSync, fstatSync, closeSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir, userInfo, hostname, homedir } from 'node:os';
 import { join } from 'node:path';
@@ -28,9 +28,19 @@ function failsafeCacheFile (agent) {
 function readFailsafeCache (agent) {
   try { const v = JSON.parse(readFileSync(failsafeCacheFile(agent), 'utf8')); return (v.failsafe === 'open' || v.failsafe === 'closed') ? v.failsafe : null; } catch { return null; }
 }
-function writeFailsafeCache (agent, failsafe) {
+// Whether the workspace gates prompts, as the engine last said (true / false),
+// or null when it never said. A prompt is recorded and never refused while this
+// is false, so the prompt hook must not refuse one for an unreachable engine
+// either: measured on the ChatGPT desktop app, a fail-closed timeout held a
+// prompt the workspace would have let through.
+export function readGatePromptsCache (agent) {
+  try { const v = JSON.parse(readFileSync(failsafeCacheFile(agent), 'utf8')); return typeof v.gate_prompts === 'boolean' ? v.gate_prompts : null; } catch { return null; }
+}
+function writeFailsafeCache (agent, failsafe, gatePrompts) {
   if (failsafe !== 'open' && failsafe !== 'closed') return;
-  try { writeFileSync(failsafeCacheFile(agent), JSON.stringify({ failsafe }), 'utf8'); } catch { /* non-fatal */ }
+  const entry = { failsafe };
+  if (typeof gatePrompts === 'boolean') entry.gate_prompts = gatePrompts;
+  try { writeFileSync(failsafeCacheFile(agent), JSON.stringify(entry), 'utf8'); } catch { /* non-fatal */ }
 }
 
 export function trunc (s, n = 300) {
@@ -61,6 +71,7 @@ export function trunc (s, n = 300) {
 //   CLEVR_FAILSAFE         'open' (default) allow on engine error/timeout, or
 //                          'closed' to deny. Unset key always allows.
 //   CLEVR_TIMEOUT_MS       evaluate timeout. Default 4000.
+//   CLEVR_PROMPT_TIMEOUT_MS  evaluate timeout on the prompt channel. Default 8000.
 //   CLEVR_ENV              environment label sent to the engine (prod/staging/dev).
 
 // WHO this run is acting for.
@@ -144,6 +155,10 @@ export function loadConfig (defaultAgent = 'claude-code') {
     forwardCtx: process.env.CLEVR_FORWARD_CONTEXT !== '0',
     contextTurns: Math.max(1, Number(process.env.CLEVR_CONTEXT_TURNS) || 6),
     timeoutMs: Number(process.env.CLEVR_TIMEOUT_MS || 4000),
+    // The prompt channel waits longer than the tool gate: a prompt is scanned
+    // whole (content detectors on the full text) and a refusal there costs the
+    // person the turn, whereas the tool gate answers on a short command.
+    promptTimeoutMs: Number(process.env.CLEVR_PROMPT_TIMEOUT_MS || 8000),
     env: process.env.CLEVR_ENV || null,
     // CLEVR_SENSITIVE=1 → per-session "minimal" mode: the gate sends ONLY the
     // action SHAPE (agent/tool/action_type/action/target). The conversation, the
@@ -167,9 +182,27 @@ export function loadConfig (defaultAgent = 'claude-code') {
 // our block message got echoed back into the next scan). A genuine chat turn is
 // the only kind that carries `message.role` = 'user' | 'assistant'; everything
 // else is skipped.
+// Only the TAIL of the transcript is read. A session's transcript grows without
+// bound (357 MB after a day of work, measured 2026-09-20) and this runs on every
+// tool call: reading and parsing the whole file took longer than the gate's own
+// budget, so the gate refused ordinary edits as "engine unreachable" while the
+// engine answered in 30 ms. The last messages sit at the end of the file.
+const TRANSCRIPT_TAIL_BYTES = 1024 * 1024;
+function readTail (path, bytes) {
+  const fd = openSync(path, 'r');
+  try {
+    const size = fstatSync(fd).size;
+    const start = Math.max(0, size - bytes);
+    const buf = Buffer.alloc(size - start);
+    readSync(fd, buf, 0, buf.length, start);
+    let s = buf.toString('utf8');
+    if (start > 0) { const nl = s.indexOf('\n'); s = nl >= 0 ? s.slice(nl + 1) : ''; }
+    return s;
+  } finally { closeSync(fd); }
+}
 export function readConversation (path, max = 6) {
   try {
-    const lines = readFileSync(path, 'utf8').trim().split('\n');
+    const lines = readTail(path, TRANSCRIPT_TAIL_BYTES).trim().split('\n');
     const msgs = [];
     for (const line of lines) {
       let e;
@@ -274,7 +307,7 @@ export async function postEvaluate (cfg, body) {
     });
     if (r.status < 200 || r.status >= 300) throw new Error(`HTTP ${r.status}`);
     const verdict = JSON.parse(r.body);
-    writeFailsafeCache(cfg.agent, verdict.failsafe);   // remember the policy for offline calls
+    writeFailsafeCache(cfg.agent, verdict.failsafe, verdict.gate_prompts);   // remember the policy for offline calls
     return { verdict };
   } catch (e) {
     // Brain unreachable → last-known workspace/agent policy (disk cache), else the

@@ -24,7 +24,7 @@
 // from the conversation — it gets fully scanned without spurious verb blocks.
 
 import { readFileSync } from 'node:fs';
-import { trunc, loadConfig, readConversation, postEvaluate } from './clevr-common.mjs';
+import { trunc, loadConfig, readConversation, postEvaluate, readGatePromptsCache } from './clevr-common.mjs';
 
 // UserPromptSubmit: empty output (exit 0) = the prompt proceeds.
 function allow () { process.exit(0); }
@@ -88,9 +88,18 @@ async function main () {
     metadata: { cwd, source: cfg.source, event: 'user-prompt' },
   };
 
-  const res = await postEvaluate(cfg, body);
+  const res = await postEvaluate({ ...cfg, timeoutMs: cfg.promptTimeoutMs }, body);
   if (res.inactive) allow();
-  if (res.failclosed) block(res.reason);
+  if (res.failclosed) {
+    // Fail-closed refuses what the workspace would GATE. While the workspace
+    // does not gate prompts (recorded, never refused), an unreachable engine
+    // loses a record, not a decision, and the prompt goes through with a note.
+    if (readGatePromptsCache(cfg.agent) === false) {
+      process.stderr.write(`[clevr] engine unreachable (${res.reason}); this workspace records prompts without gating them, so the prompt proceeds unrecorded.\n`);
+      allow();
+    }
+    block(res.reason);
+  }
   if (res.failopen) {
     process.stderr.write(`[clevr] engine error (${res.reason}); allowing (fail-open).\n`);
     allow();
