@@ -24,7 +24,7 @@
 // from the conversation — it gets fully scanned without spurious verb blocks.
 
 import { readFileSync } from 'node:fs';
-import { trunc, loadConfig, readConversation, postEvaluate, readGatePromptsCache } from './clevr-common.mjs';
+import { trunc, loadConfig, readConversation, postPrompt, actsFor } from './clevr-common.mjs';
 
 // UserPromptSubmit: empty output (exit 0) = the prompt proceeds.
 function allow () { process.exit(0); }
@@ -83,23 +83,26 @@ async function main () {
     target: null,
     environment: cfg.env,
     session_id: session_id || null,
+    on_behalf_of: actsFor(cwd),      // the person who typed it, as the tool gate sends it
     session_goal: firstUser ? trunc(firstUser.content, 300) : null,
     conversation,                    // the prompt itself — scanned by the content floor
     metadata: { cwd, source: cfg.source, event: 'user-prompt' },
   };
 
-  const res = await postEvaluate({ ...cfg, timeoutMs: cfg.promptTimeoutMs }, body);
+  // This workspace records prompts without gating them, so the verdict that is
+  // coming cannot refuse anything. Send it and hand the turn back: the record
+  // still lands, and the person does not wait on a decision with no effect. The
+  // tool calls this prompt leads to are each governed on their own.
+  const res = await postPrompt(cfg, body);
   if (res.inactive) allow();
-  if (res.failclosed) {
-    // Fail-closed refuses what the workspace would GATE. While the workspace
-    // does not gate prompts (recorded, never refused), an unreachable engine
-    // loses a record, not a decision, and the prompt goes through with a note.
-    if (readGatePromptsCache(cfg.agent) === false) {
-      process.stderr.write(`[clevr] engine unreachable (${res.reason}); this workspace records prompts without gating them, so the prompt proceeds unrecorded.\n`);
-      allow();
-    }
-    block(res.reason);
+  // The workspace records prompts without gating them, so the verdict could not
+  // refuse anything: the turn goes back without waiting for it, and an engine
+  // that never received the record loses a record, not a decision.
+  if (res.ungated) {
+    if (!res.sent) process.stderr.write('[clevr] engine unreachable; this workspace records prompts without gating them, so the prompt proceeds unrecorded.\n');
+    allow();
   }
+  if (res.failclosed) block(res.reason);
   if (res.failopen) {
     process.stderr.write(`[clevr] engine error (${res.reason}); allowing (fail-open).\n`);
     allow();

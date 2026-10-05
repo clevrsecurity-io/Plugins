@@ -45,7 +45,7 @@ const CFG = {
   agent: process.env.CLEVR_AGENT || 'mcp-host',
   shadow: process.env.CLEVR_MODE === 'shadow',
   failClosed: process.env.CLEVR_FAILSAFE === 'closed',
-  timeoutMs: Number(process.env.CLEVR_TIMEOUT_MS || 8000),
+  timeoutMs: Number(process.env.CLEVR_TIMEOUT_MS || 15000),
 }
 
 // One fail policy the whole guard obeys. Learned from the brain's verdicts
@@ -184,9 +184,21 @@ function denyResult (id, reason, decisionId) {
   confirmEnforcement(decisionId, 'denied')
 }
 
-// Host -> upstream: intercept tools/call, pass everything else through. We pump
-// the host stream through a serial queue so ordering is preserved across the
-// async evaluate (an out-of-order forward could race a dependent request).
+// Data / side-effect MCP methods this guard CANNOT govern are REFUSED, not
+// forwarded: resources/read pulls a file:/// or db:// resource and prompts/get
+// returns a prompt -- both sidestep the tools/call floor entirely if passed
+// through ungoverned. Mirrors the gateway MCP door (UNGOVERNED_MCP). Discovery /
+// lifecycle (initialize, tools/list, resources/list, prompts/list) and
+// notifications still pass; a later change can evaluate these through the engine.
+const UNGOVERNED_MCP = new Set(['resources/read', 'resources/subscribe', 'prompts/get'])
+function refuseMethod (id, method) {
+  send({ jsonrpc: '2.0', id, error: { code: -32601, message: `Clevr governs tool calls on this guard; the MCP method "${method}" returns data outside that governance and is refused rather than forwarded ungoverned.` } })
+}
+
+// Host -> upstream: intercept tools/call AND the ungoverned data methods above,
+// pass everything else through. We pump the host stream through a serial queue so
+// ordering is preserved across the async evaluate (an out-of-order forward could
+// race a dependent request).
 let chain = Promise.resolve()
 const rl = createInterface({ input: process.stdin, crlfDelay: Infinity })
 rl.on('line', (line) => {
@@ -203,7 +215,9 @@ rl.on('close', () => { chain.finally(() => { try { up.stdin.end() } catch {} }) 
 async function handle (line) {
   let msg
   try { msg = JSON.parse(line) } catch { return forward(line) } // not JSON we understand -> pass through
-  if (!active || msg.method !== 'tools/call' || msg.id == null) return forward(line)
+  if (!active || msg.id == null) return forward(line)                   // inactive guard / notifications pass through
+  if (UNGOVERNED_MCP.has(msg.method)) return refuseMethod(msg.id, msg.method)  // data pull we cannot govern -> refuse
+  if (msg.method !== 'tools/call') return forward(line)
 
   const name = msg.params?.name || 'tool'
   const args = msg.params?.arguments

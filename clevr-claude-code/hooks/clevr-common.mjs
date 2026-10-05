@@ -15,6 +15,7 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir, userInfo, hostname, homedir } from 'node:os';
 import { join } from 'node:path';
 import http from 'node:http';
+import { createHash } from 'node:crypto';
 import https from 'node:https';
 
 // Disk cache of the workspace/per-agent fail policy. These hooks are SHORT-LIVED
@@ -36,11 +37,82 @@ function readFailsafeCache (agent) {
 export function readGatePromptsCache (agent) {
   try { const v = JSON.parse(readFileSync(failsafeCacheFile(agent), 'utf8')); return typeof v.gate_prompts === 'boolean' ? v.gate_prompts : null; } catch { return null; }
 }
+// Whether this workspace said RECENTLY that it does not gate prompts. The
+// offline reader above trusts any answer, however old, because offline a stale
+// answer beats none. Skipping the wait is a different question: the posture can
+// be turned on in the console, and the prompt path would be the last to hear
+// about it, so the answer is only trusted for a while. In practice the tool
+// gate rewrites this file on every call, so the entry is nearly always seconds
+// old and no prompt ever waits.
+const POSTURE_TRUSTED_MS = 10 * 60 * 1000;
+export function promptsUngatedRecently (agent) {
+  try {
+    const v = JSON.parse(readFileSync(failsafeCacheFile(agent), 'utf8'));
+    return v.gate_prompts === false && typeof v.at === 'number' && (Date.now() - v.at) < POSTURE_TRUSTED_MS;
+  } catch { return false; }
+}
+// The effective fail policy for THIS agent when the hook cannot get a verdict:
+// the last workspace/agent policy the tool gate cached, else the CLEVR_FAILSAFE
+// bootstrap. Exported so a hook's own error path fails the SAME way an engine-
+// unreachable does, instead of unconditionally allowing (a post-verdict crash
+// must not turn a block/escalate into an ungoverned run under a fail-closed org).
+export function effectiveFailsafe (cfg) {
+  try { return readFailsafeCache(cfg && cfg.agent) || (cfg && cfg.failsafe) || 'open'; }
+  catch { return (cfg && cfg.failsafe) || 'open'; }
+}
+
 function writeFailsafeCache (agent, failsafe, gatePrompts) {
   if (failsafe !== 'open' && failsafe !== 'closed') return;
-  const entry = { failsafe };
+  const entry = { failsafe, at: Date.now() };
   if (typeof gatePrompts === 'boolean') entry.gate_prompts = gatePrompts;
   try { writeFileSync(failsafeCacheFile(agent), JSON.stringify(entry), 'utf8'); } catch { /* non-fatal */ }
+}
+
+// ── The held decision this machine was last refused on, per action ──────────
+// Only the SDK can wait for a person. Every other door refuses and the agent
+// retries, and that retry used to produce a NEW hold: approving changed nothing
+// the agent could use. So the gate remembers which decision this exact action
+// was held on, and presents it on the next identical attempt. The engine spends
+// the approval once, on the same agent, the same tool and the same arguments,
+// inside its own window; a remembered id that does not match all of that simply
+// buys nothing.
+//
+// Local, disposable, and never authority: the file holds an id the engine
+// issued, not a permission. Deleting it costs one extra hold.
+function heldFile (agent) {
+  return join(tmpdir(), `clevr-held-${String(agent || 'default').replace(/[^a-zA-Z0-9_-]/g, '')}.json`);
+}
+function actionKey (tool, input) {
+  let args = '';
+  try { args = JSON.stringify(input ?? null); } catch { args = String(input ?? ''); }
+  return createHash('sha256').update(`${tool || ''}::${args}`).digest('hex').slice(0, 32);
+}
+/** The decision id this exact action was held on, if it still looks fresh. */
+export function rememberedHold (agent, tool, input) {
+  try {
+    const v = JSON.parse(readFileSync(heldFile(agent), 'utf8'));
+    const e = v[actionKey(tool, input)];
+    if (!e || !e.id) return null;
+    // The engine's own window is thirty minutes; anything older cannot be spent,
+    // so there is no point sending it.
+    if (Date.now() - Number(e.at || 0) > 30 * 60_000) return null;
+    return e.id;
+  } catch { return null; }
+}
+/** Remember (or forget, with a null id) the hold on this action. */
+export function rememberHold (agent, tool, input, decisionId) {
+  try {
+    const f = heldFile(agent);
+    let v = {};
+    try { v = JSON.parse(readFileSync(f, 'utf8')) || {}; } catch { v = {}; }
+    const k = actionKey(tool, input);
+    if (decisionId) v[k] = { id: decisionId, at: Date.now() };
+    else delete v[k];
+    // Keep the file small: the twenty most recent entries are plenty for a
+    // session, and an unbounded map on a long-running machine is a leak.
+    const keys = Object.keys(v).sort((a, b) => (v[b].at || 0) - (v[a].at || 0)).slice(0, 20);
+    writeFileSync(f, JSON.stringify(Object.fromEntries(keys.map((x) => [x, v[x]]))), 'utf8');
+  } catch { /* non-fatal: the worst case is one more hold */ }
 }
 
 export function trunc (s, n = 300) {
@@ -70,8 +142,8 @@ export function trunc (s, n = 300) {
 //                          Code's own prompt). Default off: Clevr only blocks/asks.
 //   CLEVR_FAILSAFE         'open' (default) allow on engine error/timeout, or
 //                          'closed' to deny. Unset key always allows.
-//   CLEVR_TIMEOUT_MS       evaluate timeout. Default 4000.
-//   CLEVR_PROMPT_TIMEOUT_MS  evaluate timeout on the prompt channel. Default 8000.
+//   CLEVR_TIMEOUT_MS       evaluate timeout. Default 15000.
+//   CLEVR_PROMPT_TIMEOUT_MS  evaluate timeout on the prompt channel. Default 15000.
 //   CLEVR_ENV              environment label sent to the engine (prod/staging/dev).
 
 // WHO this run is acting for.
@@ -154,11 +226,16 @@ export function loadConfig (defaultAgent = 'claude-code') {
     escalate: (process.env.CLEVR_ESCALATE || 'deny').toLowerCase(),
     forwardCtx: process.env.CLEVR_FORWARD_CONTEXT !== '0',
     contextTurns: Math.max(1, Number(process.env.CLEVR_CONTEXT_TURNS) || 6),
-    timeoutMs: Number(process.env.CLEVR_TIMEOUT_MS || 4000),
-    // The prompt channel waits longer than the tool gate: a prompt is scanned
-    // whole (content detectors on the full text) and a refusal there costs the
-    // person the turn, whereas the tool gate answers on a short command.
-    promptTimeoutMs: Number(process.env.CLEVR_PROMPT_TIMEOUT_MS || 8000),
+    timeoutMs: Number(process.env.CLEVR_TIMEOUT_MS || 15000),
+    // One budget for both channels, and it is set by what the ENGINE can take,
+    // not by what feels quick. Measured over 47 928 decisions in 7 days: half
+    // answer in 91ms, 99% in 3.7s, and 296 took longer than the 4000ms this
+    // waited. A gate that fails closed turns each of those into a refusal no
+    // policy chose, on ordinary work. 15s clears the reasoning tier (2.5s) with
+    // room for the writes around it and still covers 76% of that tail; past it
+    // the engine is not slow, it is stuck, and a stuck engine must be reported
+    // rather than waited on.
+    promptTimeoutMs: Number(process.env.CLEVR_PROMPT_TIMEOUT_MS || 15000),
     env: process.env.CLEVR_ENV || null,
     // CLEVR_SENSITIVE=1 → per-session "minimal" mode: the gate sends ONLY the
     // action SHAPE (agent/tool/action_type/action/target). The conversation, the
@@ -246,7 +323,7 @@ export function readConversation (path, max = 6) {
 // aborts the process with a fatal exit code, so Claude Code reports a "hook
 // error" even though the gate answered fine. agent:false closes the socket as
 // soon as the response ends, leaving no handle for process.exit to race with.
-function httpPostJson (urlStr, { headers = {}, body = '', timeoutMs = 4000 } = {}) {
+function httpPostJson (urlStr, { headers = {}, body = '', timeoutMs = 15000 } = {}) {
   return new Promise((resolve, reject) => {
     let url;
     try { url = new URL(urlStr); } catch (e) { reject(e); return; }
@@ -307,6 +384,15 @@ export async function postEvaluate (cfg, body) {
     });
     if (r.status < 200 || r.status >= 300) throw new Error(`HTTP ${r.status}`);
     const verdict = JSON.parse(r.body);
+    // A 200 is not automatically a verdict. A proxy or a misconfigured endpoint on
+    // the configured URL can answer 200 with valid JSON that carries no effect (an
+    // empty object, an error envelope, a captive-portal / auth body). Trusting it
+    // let the gate read verdict.effect === undefined and fall through to allow --
+    // ungoverned even under a fail-closed workspace. An answer with no string
+    // effect is the engine not answering, so apply the SAME failsafe as unreachable.
+    if (!verdict || typeof verdict !== 'object' || typeof verdict.effect !== 'string' || !verdict.effect) {
+      throw new Error('engine returned no verdict effect');
+    }
     writeFailsafeCache(cfg.agent, verdict.failsafe, verdict.gate_prompts);   // remember the policy for offline calls
     return { verdict };
   } catch (e) {
@@ -316,6 +402,49 @@ export async function postEvaluate (cfg, body) {
     if (eff === 'closed') return { failclosed: true, reason: `Clevr engine unreachable (${e.message}); fail-closed.` };
     return { failopen: true, reason: e.message };
   }
+}
+
+// Post a decision the caller cannot act on, and do not wait for the answer.
+//
+// A workspace that records prompts without gating them cannot refuse one, so
+// waiting for that verdict spends the person's turn on a decision with no
+// effect: measured on this instance, a prompt answers in 1.3s at the median
+// against 96ms for a tool call. This resolves as soon as the request is on the
+// wire, which is all the record needs; the engine answers into a socket nobody
+// is reading, which is fine, and the failsafe cache stays fresh from the tool
+// gate, which runs far more often.
+export function postUnwatched (cfg, body) {
+  if (!cfg.apiKey) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (sent) => { if (!done) { done = true; resolve(sent === true); } };
+    let url;
+    try { url = new URL(`${cfg.base}/v1/evaluate`); } catch { finish(); return; }
+    const mod = url.protocol === 'https:' ? https : http;
+    const payload = Buffer.from(JSON.stringify(body));
+    const req = mod.request(url, {
+      method: 'POST',
+      agent: false,
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}`, 'Content-Length': payload.length },
+    }, (res) => { res.resume(); });
+    req.on('error', finish);
+    // A send that cannot complete must not hold the turn either.
+    req.setTimeout(2000, () => { req.destroy(); finish(); });
+    req.end(payload, () => finish(true));   // flushed, not answered
+  });
+}
+
+// The prompt path, once, for every harness.
+//
+// Three of the five gates refused a prompt on an unreachable engine even where
+// the workspace records prompts without gating them, because that rule lived in
+// one hook instead of here. Both cases now answer the same way: `ungated` means
+// the prompt proceeds, and `sent` says whether the record left this machine.
+export async function postPrompt (cfg, body) {
+  if (promptsUngatedRecently(cfg.agent)) return { ungated: true, sent: await postUnwatched(cfg, body) };
+  const res = await postEvaluate({ ...cfg, timeoutMs: cfg.promptTimeoutMs }, body);
+  if (res.failclosed && readGatePromptsCache(cfg.agent) === false) return { ungated: true, sent: false };
+  return res;
 }
 
 // Confirm to the engine what the gate ACTUALLY did with a verdict — 'denied' (it
@@ -368,6 +497,9 @@ export function promptBody (cfg, { prompt, sessionId, cwd, source, history = [] 
     target: null,
     environment: cfg.env,
     session_id: sessionId || null,
+    // The person, as the tool gate sends it: the prompt is theirs, and without
+    // it every turn but the tool calls read as nobody's.
+    on_behalf_of: actsFor(cwd),
     session_goal: firstUser ? trunc(firstUser.content, 300) : null,
     conversation,
     metadata: { cwd: cwd || null, source, event: 'user-prompt' },
@@ -392,6 +524,7 @@ export function resultBody (cfg, { tool, input, output, callId, sessionId, cwd, 
     target: null,
     environment: cfg.env,
     session_id: sessionId || null,
+    on_behalf_of: actsFor(cwd),
     actor_chain: [{ type: 'agent', id: cfg.agent, display: cfg.agent }],
     conversation: [
       { role: 'assistant', content: '', tool_calls: [{ id, name: tool, args: (input && typeof input === 'object' && !Array.isArray(input)) ? input : {} }] },
@@ -419,6 +552,7 @@ export function answerBody (cfg, { answer, systemPrompt, sessionId, cwd, source,
     target: null,
     environment: cfg.env,
     session_id: sessionId || null,
+    on_behalf_of: actsFor(cwd),
     ...(systemPrompt ? { system_prompt: trunc(String(systemPrompt), maxChars) } : {}),
     metadata: { cwd: cwd || null, source, event: 'model-answer' },
   };

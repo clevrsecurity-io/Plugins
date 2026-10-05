@@ -15,7 +15,7 @@
 // never fires — the PreToolUse agent_id path still branches the lineage.
 
 import { readFileSync } from 'node:fs';
-import { trunc, loadConfig, postEvaluate } from './clevr-common.mjs';
+import { trunc, loadConfig, postEvaluate, actsFor } from './clevr-common.mjs';
 
 async function main () {
   let hook = {};
@@ -24,7 +24,7 @@ async function main () {
   const cfg = loadConfig();
   if (!cfg.apiKey) process.exit(0);
 
-  const { agent_id, agent_type, task, session_id } = hook;
+  const { agent_id, agent_type, task, session_id, cwd } = hook;
   const subName = agent_type || 'subagent';
 
   const body = {
@@ -35,6 +35,8 @@ async function main () {
     target: subName,
     environment: cfg.env,
     session_id: session_id || null,
+    // The person the session acts for: a sub-agent works for them too.
+    on_behalf_of: actsFor(cwd),
     actor_chain: [
       { type: 'agent', id: cfg.agent, display: cfg.agent },
       { type: 'agent', id: subName, display: subName, on_behalf_of: cfg.agent, harness_agent_id: agent_id || null, identity: 'asserted' },

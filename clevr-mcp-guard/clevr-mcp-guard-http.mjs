@@ -32,7 +32,7 @@ const CLEVR_URL = (process.env.CLEVR_URL || 'http://localhost:8787').replace(/\/
 const CLEVR_KEY = process.env.CLEVR_API_KEY || '';
 const AGENT     = process.env.CLEVR_AGENT || 'copilot-studio';
 const UPSTREAM  = (process.env.MCP_UPSTREAM_URL || '').replace(/\/+$/, '');
-const TIMEOUT   = +(process.env.CLEVR_TIMEOUT_MS || 6000);
+const TIMEOUT   = +(process.env.CLEVR_TIMEOUT_MS || 15000);
 const FAILSAFE  = (process.env.CLEVR_FAILSAFE || 'open').toLowerCase();
 // A shared secret the caller must present. Copilot Studio sends an API key
 // header on an MCP connection; without this anyone who finds the URL reaches
@@ -94,6 +94,16 @@ const refuse = (id, text) => ({
   result: { isError: true, content: [{ type: 'text', text }] },
 });
 
+// Data / side-effect MCP methods this guard CANNOT govern are REFUSED, not relayed:
+// resources/read pulls a file:/// or db:// resource and prompts/get returns a prompt
+// -- both sidestep the tools/call floor entirely if passed through. Mirrors the
+// gateway MCP door (UNGOVERNED_MCP). Discovery/lifecycle (initialize, *_list) pass.
+const UNGOVERNED_MCP = new Set(['resources/read', 'resources/subscribe', 'prompts/get']);
+const refuseMethod = (id, method) => ({
+  jsonrpc: '2.0', id,
+  error: { code: -32601, message: `Clevr governs tool calls on this guard; the MCP method "${method}" returns data outside that governance and is refused rather than relayed ungoverned.` },
+});
+
 // Tell the engine the guard refused the call ('denied'), so the console shows
 // "did not run" on the guard's word and not on the verdict alone. Fire and
 // forget, bounded, never in the caller's path.
@@ -141,9 +151,14 @@ const server = http.createServer(async (req, res) => {
   };
 
   try {
-    // Everything that is not a tool call is relayed untouched: initialize,
-    // tools/list, prompts, resources, notifications. A guard that reshaped the
-    // handshake would break servers it does not know about.
+    // Data / side-effect methods we cannot govern are refused BEFORE the relay, so
+    // resources/read and prompts/get cannot sidestep the tools/call floor.
+    if (msg.id != null && UNGOVERNED_MCP.has(msg.method)) {
+      return send(refuseMethod(msg.id, msg.method));
+    }
+    // Everything else that is not a tool call is relayed untouched: initialize,
+    // tools/list, resources/list, prompts/list, notifications. A guard that reshaped
+    // the handshake would break servers it does not know about.
     if (msg.method !== 'tools/call' || msg.id == null) {
       const up = await relay(msg, passHeaders);
       return send(up.text, up.status, up.sessionId ? { 'mcp-session-id': up.sessionId } : {});

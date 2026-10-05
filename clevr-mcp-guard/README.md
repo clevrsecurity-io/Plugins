@@ -93,7 +93,7 @@ Restart the host so it relaunches its servers.
 | `CLEVR_AGENT` | `mcp-host` | the agent the calls are recorded under |
 | `CLEVR_MODE` | enforce | `shadow` forwards and records only |
 | `CLEVR_FAILSAFE` | open | the bootstrap before the workspace policy is known; `closed` refuses when the engine is unreachable |
-| `CLEVR_TIMEOUT_MS` | `8000` | per-call evaluate timeout |
+| `CLEVR_TIMEOUT_MS` | `15000` | per-call evaluate timeout |
 
 ## What it does not cover
 

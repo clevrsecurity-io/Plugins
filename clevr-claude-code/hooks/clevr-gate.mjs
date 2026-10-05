@@ -7,7 +7,8 @@
 //
 //   allow    -> proceed  (additive: Claude Code's own prompts still apply,
 //                          unless CLEVR_AUTO_APPROVE=1 makes Clevr the sole gate)
-//   escalate -> ask      (Claude Code shows the user the approval dialog)
+//   escalate -> deny     (a hold is decided in the console, never by asking the
+//                         developer here; CLEVR_ESCALATE=allow lets it through)
 //   block    -> deny     (the tool never runs; the model sees the reason)
 //
 // It also forwards the recent conversation from the transcript and the Claude
@@ -21,7 +22,7 @@
 // clevr-common.mjs for the full CLEVR_* list.
 
 import { readFileSync } from 'node:fs';
-import { trunc, loadConfig, readConversation, postEvaluate, confirmEnforcement, machineContext, evidenceRefs, actsFor } from './clevr-common.mjs';
+import { trunc, loadConfig, readConversation, postEvaluate, confirmEnforcement, machineContext, evidenceRefs, actsFor, rememberedHold, rememberHold, effectiveFailsafe } from './clevr-common.mjs';
 
 function out (decision, reason) {
   if (decision) {
@@ -59,11 +60,12 @@ function classify (tool, input = {}) {
   return { action_type: 'tool_call', action: `${t}(${trunc(JSON.stringify(input))})`, target: null };
 }
 
+let cfg = null;   // module-scoped so the top-level catch can read the fail policy
 async function main () {
   let hook = {};
   try { hook = JSON.parse(readFileSync(0, 'utf8')); } catch { out(null); }
 
-  const cfg = loadConfig();
+  cfg = loadConfig();
   if (!cfg.apiKey) {
     process.stderr.write('[clevr] CLEVR_API_KEY not set; gate inactive (allowing). Set it to enforce.\n');
     out(null);
@@ -120,6 +122,13 @@ async function main () {
     }
   }
 
+  // If this exact action was held before and someone has approved it since, the
+  // engine spends that approval here and the retry runs. It checks the agent,
+  // the tool, the arguments and its own window, so a remembered id that no
+  // longer fits simply buys nothing.
+  const pending = rememberedHold(cfg.agent, tool_name, tool_input);
+  if (pending) body.resume = pending;
+
   const res = await postEvaluate(cfg, body);
   if (res.inactive) out(null);
   if (res.failclosed) out('deny', res.reason);
@@ -170,6 +179,12 @@ async function main () {
       ? `${tenantMsg}${tag}`
       : `Clevr blocked this action: ${reason}${tag}`);
   }
+  // Remember which decision this action was held on, so the retry can spend the
+  // approval. Forgotten as soon as the action runs: an id already spent, or one
+  // the engine no longer holds, has nothing left to buy.
+  if (effect === 'escalate' || effect === 'step_up') rememberHold(cfg.agent, tool_name, tool_input, decisionId);
+  else if (pending) rememberHold(cfg.agent, tool_name, tool_input, null);
+
   if (effect === 'escalate' || effect === 'step_up') {
     // A hold means a PERSON decides, in the console or from Slack or Teams.
     // It never means asking the developer sitting here: approving your own hold
@@ -181,16 +196,22 @@ async function main () {
     if (tenantMsg) return decide('deny', 'denied', `${tenantMsg}${tag}`);
     if (authority) {
       return decide('deny', 'denied',
-        `Clevr did not run this: ${reason} Authorize the tool in the mandate, or have someone approve this action in the console.${tag}`);
+        `Clevr did not run this: ${reason} Authorize the tool in the mandate, or have someone approve this action in the console and then run exactly the same command again.${tag}`);
     }
     return decide('deny', 'denied',
-      `Clevr did not run this. It needs a human decision, and this gate answers in seconds so it cannot wait for one: ${reason}${tag}`);
+      `Clevr did not run this. It needs a human decision, and this gate answers in seconds so it cannot wait for one: ${reason} Once someone has approved it, run exactly the same command again and it will go through.${tag}`);
   }
   if (cfg.autoApprove) out('allow', `Clevr allowed this action${tag}`);  // allow: no enforcement claim to confirm
   out(null);  // additive: let Claude Code's normal permission flow proceed
 }
 
 main().catch((e) => {
-  process.stderr.write(`[clevr] gate error: ${e.message}; allowing.\n`);
-  out(null);
+  // A hook-internal error is the gate failing to complete, exactly like an
+  // unreachable engine, so it must obey the SAME fail policy -- not unconditionally
+  // allow. Under a fail-closed workspace this denies (a post-verdict crash, e.g. in
+  // rememberHold, must never let a block/escalate run ungoverned); a fail-open org
+  // (or a cold-start hook that never reached the brain) still proceeds.
+  const closed = effectiveFailsafe(cfg) === 'closed';
+  process.stderr.write(`[clevr] gate error: ${e.message}; ${closed ? 'denying (fail-closed per policy)' : 'allowing (fail-open per policy)'}.\n`);
+  out(closed ? 'deny' : null, closed ? `Clevr gate error; failing closed per policy: ${e.message}` : undefined);
 });

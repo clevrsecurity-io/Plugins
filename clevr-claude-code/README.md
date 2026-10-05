@@ -12,7 +12,7 @@ Each action is mapped onto Claude Code's own permission model:
 | Clevr verdict | Claude Code behavior |
 |---|---|
 | `allow` | proceeds (Clevr is additive; Claude Code's own prompts still apply) |
-| `escalate` | held: the tool does not run and the reason says why (a hook answers in seconds and cannot wait for a console approval). Approve it in the console and run it again. A prompt is held. |
+| `escalate` | held: the tool does not run and the reason says why (a hook answers in seconds and cannot wait for a console approval). Approve it in Clevr, then run exactly the same command again: the gate presents the approved decision and the engine spends it once, on that same action. A prompt is held. |
 | `block` | the tool never runs / the prompt is refused; the model is told why |
 
 Every decision is sealed into Clevr's signed, offline-verifiable audit chain, and the tool call is situated in its session with the surrounding conversation, so a block reads as "this agent, in this session, on this conversation, tried X, and here is why it was stopped."
@@ -84,7 +84,7 @@ it starts with no shell environment at all. An exported key still wins.
 |---|---|---|
 | `CLEVR_API_KEY` | (required) | Org key; read from `~/.clevr/config.json` when unset. With neither, the gate is inactive (allows everything) so it never bricks Claude Code. |
 | `CLEVR_URL` | `http://localhost:8787` | Engine base URL. The gate calls `<url>/v1/evaluate`. |
-| `CLEVR_PROMPT_TIMEOUT_MS` | `8000` | How long the prompt hook waits for the engine. Longer than the tool gate's `CLEVR_TIMEOUT_MS` (4000): a prompt is scanned whole. Past it, the prompt follows the workspace: held when the workspace gates prompts and fails closed, let through with a note when the workspace only records them. |
+| `CLEVR_PROMPT_TIMEOUT_MS` | `15000` | How long the prompt hook waits for the engine, the same budget as the tool gate. Past it, the prompt follows the workspace: held when the workspace gates prompts and fails closed, let through with a note when the workspace only records them. |
 | `CLEVR_AGENT` | `claude-code` | Identity recorded in the audit log. |
 | `CLEVR_ESCALATE` | `deny` | What a Hold does on the tool gate: `deny` refuses the action (nothing runs that nobody approved); `allow` lets it through and records that this machine did. There is no option to ask the person at the keyboard: approving your own hold empties the control. |
 | `CLEVR_SENSITIVE` | `0` | `1` sends only the action shape to the engine: no prompt, no tool arguments, no tool result, no reply. The tool gate still governs by nature, reach and authority. Use it for a confidential task instead of disabling the plugin. |
@@ -92,7 +92,7 @@ it starts with no shell environment at all. An exported key still wins.
 | `CLEVR_CONTEXT_TURNS` | `6` | How many recent transcript turns to forward as context. Raise it to widen the window the engine scans (catches an injection planted earlier in the session), at the cost of a larger payload. |
 | `CLEVR_AUTO_APPROVE` | `0` | `1` makes Clevr the sole gate: a Clevr `allow` skips Claude Code's own prompt. Default keeps Clevr additive (it only blocks or escalates). |
 | `CLEVR_FAILSAFE` | `open` | On engine error or timeout: `open` allows, `closed` denies. An unset key always allows. |
-| `CLEVR_TIMEOUT_MS` | `4000` | Per-call evaluate timeout. |
+| `CLEVR_TIMEOUT_MS` | `15000` | Per-call evaluate timeout. |
 | `CLEVR_ENV` | (none) | Environment label (`prod` / `staging` / `dev`) sent to the engine. |
 | `CLEVR_RESULT_MAX_CHARS` | `8000` | How much of a tool's result to forward for scanning. The detectors work on the text, not the volume. |
 | `CLEVR_SESSION_CONTEXT` | `1` | `0` stops the plugin telling the model at session start that it is governed. |
@@ -111,7 +111,7 @@ The plugin registers six hooks and one command (Node, no dependencies; shared he
 
 1. Reads the tool call from stdin and maps it to an engine action (`Bash` to `exec`, `Write`/`Edit` to `write`, `Read` to `read`, `mcp__*` to `tool_call`, and so on). The command, path, or arguments are sent as the action text so the deterministic content floor can scan them.
 2. Optionally reads the recent conversation from the transcript and the session id, so the same gate that governs the action also gives it meaning in the session.
-3. Calls `POST /v1/evaluate` and translates the verdict to `allow` / `ask` / `deny`.
+3. Calls `POST /v1/evaluate` and translates the verdict to `allow` or `deny`. There is no `ask`: a hold is decided in Clevr, never by the person at this keyboard.
 
 **`UserPromptSubmit` — the prompt scanner (`hooks/clevr-prompt.mjs`), fires on every prompt:**
 

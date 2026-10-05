@@ -38,9 +38,11 @@ const ok = (name, cond, detail = '') => {
 
 // ── the stand-in MCP server ──────────────────────────────────────────────────
 const ran = [];
+const seenMethods = [];              // every method the upstream actually received
 const upstream = http.createServer(async (req, res) => {
   const c = []; for await (const x of req) c.push(x);
   const m = JSON.parse(Buffer.concat(c).toString() || '{}');
+  seenMethods.push(m.method);
   const send = (result) => {
     res.writeHead(200, { 'Content-Type': 'application/json', 'mcp-session-id': 'sess-upstream' });
     res.end(JSON.stringify({ jsonrpc: '2.0', id: m.id, result }));
@@ -141,6 +143,19 @@ async function main () {
   const list = await rpc({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
   ok('the agent sees the upstream tools, not ours',
     JSON.stringify(list.json?.result?.tools?.map((t) => t.name)) === '["db.query","files.delete"]');
+
+  console.log('\n— it refuses the data methods it cannot govern, not relay them —');
+  const errCode = (r) => r.json?.error?.code;
+  for (const method of ['resources/read', 'resources/subscribe', 'prompts/get']) {
+    const before = seenMethods.length;
+    const r = await rpc({ jsonrpc: '2.0', id: 9, method, params: { uri: 'file:///etc/passwd' } });
+    ok(`${method} is refused with a JSON-RPC error (-32601)`, errCode(r) === -32601, JSON.stringify(r.json));
+    ok(`${method} never reached the upstream`, !seenMethods.slice(before).includes(method),
+      `upstream saw ${JSON.stringify(seenMethods)}; a data pull we cannot govern must not be relayed`);
+  }
+  const rlist = await rpc({ jsonrpc: '2.0', id: 10, method: 'resources/list' });
+  ok('resources/list (discovery) is still relayed, not refused',
+    errCode(rlist) !== -32601 && seenMethods.includes('resources/list'));
 
   console.log('\n— it judges the tool call —');
   const allowed = await call('db.query', { sql: 'select 1' });

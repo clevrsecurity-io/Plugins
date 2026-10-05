@@ -23,7 +23,7 @@
 // confidential does not send it anywhere.
 
 import { readFileSync } from 'node:fs';
-import { trunc, loadConfig, readConversation, postEvaluate } from './clevr-common.mjs';
+import { trunc, loadConfig, readConversation, postEvaluate, actsFor } from './clevr-common.mjs';
 
 // Cap what we forward. A tool result can be a whole file or a page of rows; the
 // detectors work on the text, not the volume, and an unbounded payload would slow
@@ -118,6 +118,10 @@ async function main () {
     target: null,
     environment: cfg.env,
     session_id: session_id || null,
+    // The same person the call itself was sent for (clevr-gate.mjs): a result
+    // is the second half of that call, and without it every output row read
+    // as an action nobody asked for, one row in two of a session.
+    on_behalf_of: actsFor(cwd),
     actor_chain: actorChain,
     conversation,
     metadata: { cwd, source: cfg.source, event: 'tool-result', tool_use_id: tool_use_id || null, agent_id: agent_id || null, agent_type: agent_type || null },

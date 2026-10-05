@@ -22,7 +22,7 @@
 // a JSON decision on stdout. Exit 0 with no JSON is an additive no-op.
 
 import { readFileSync } from 'node:fs';
-import { trunc, loadConfig, postEvaluate, confirmEnforcement, actsFor } from './clevr-common.mjs';
+import { trunc, loadConfig, postEvaluate, confirmEnforcement, actsFor, rememberedHold, rememberHold, machineContext, evidenceRefs, effectiveFailsafe } from './clevr-common.mjs';
 
 // permission ∈ 'allow' | 'deny' | 'ask'. null => print nothing (additive no-op),
 // so Cursor's normal flow proceeds unchanged (used for allow + shadow).
@@ -54,11 +54,12 @@ function classify (toolName, input = {}) {
   return { action_type: 'tool_call', action: `${t}(${trunc(JSON.stringify(input))})`, target: input.url || null };
 }
 
+let cfg = null;   // module-scoped so the top-level catch can read the fail policy
 async function main () {
   let hook = {};
   try { hook = JSON.parse(readFileSync(0, 'utf8')); } catch { out(null); }
 
-  const cfg = loadConfig('cursor');
+  cfg = loadConfig('cursor');
   if (!cfg.apiKey) {
     process.stderr.write('[clevr] CLEVR_API_KEY not set; hook inactive (allowing). Set it to enforce.\n');
     out(null);
@@ -73,11 +74,22 @@ async function main () {
   const body = {
     agent: cfg.agent, tool: toolName, action_type, action, target,
     environment: cfg.env,
+    // Machine context for the brain's environment classifier and the ticket
+    // references the work carries (approval by evidence). Corroboration and
+    // references only: the brain derives the class and verifies the ticket.
+    context: machineContext(hook.cwd),
+    evidence: evidenceRefs(machineContext(hook.cwd), cfg.sensitive ? null : toolInput),
     session_id: hook.conversation_id || null,
     // The person this run is acting for, asserted by the machine. Unverified by
     // construction: the engine lets an asserted identity narrow what a rule
     // grants, never widen it. The key's owner outranks it server side.
     on_behalf_of: actsFor(hook.cwd),
+    // Who acted. One hop today, because Cursor's preToolUse carries no signal
+    // that a sub-agent made the call, so a second hop would be invented rather
+    // than observed. One honest hop still matters: without it the decision has
+    // no actor at all, the lineage view shows nothing for this door, and every
+    // other gate sends one. The day Cursor names a sub-agent, it appends here.
+    actor_chain: [{ type: 'agent', id: cfg.agent, display: cfg.agent }],
     // Surface the tool's arguments as target_attr so deterministic argument rules
     // (target.<name>, e.g. target.amount > 10000) can gate on them — mirrors the SDK.
     // Sensitive mode: send ONLY the shape — omit the tool arguments and raw input.
@@ -91,6 +103,13 @@ async function main () {
   if (!cfg.sensitive && cfg.forwardCtx && hook.agent_message) {
     body.conversation = [{ role: 'assistant', content: trunc(hook.agent_message, 1000) }];
   }
+
+  // If this exact action was held before and someone has approved it since,
+  // the engine spends that approval here and the retry runs. It checks the
+  // agent, the tool, the arguments and its own window, so a remembered id
+  // that no longer fits simply buys nothing.
+  const pending = rememberedHold(cfg.agent, toolName, toolInput);
+  if (pending) body.resume = pending;
 
   const res = await postEvaluate(cfg, body);
   if (res.inactive) out(null);
@@ -130,6 +149,11 @@ async function main () {
   const tenantMsg = (effect === 'block' ? v.block_message : v.stepup_message) || null;
   const authority = v.matched_policy === 'role-boundary';
   if (effect === 'block') return decide('deny', 'denied', tenantMsg ? `${tenantMsg}${tag}` : `Clevr blocked this action: ${reason}${tag}`);
+  // Remember which decision this action was held on, so the retry can spend
+  // the approval; forget it as soon as the action runs.
+  if (effect === 'escalate' || effect === 'step_up') rememberHold(cfg.agent, toolName, toolInput, decisionId);
+  else if (pending) rememberHold(cfg.agent, toolName, toolInput, null);
+
   if (effect === 'escalate' || effect === 'step_up') {
     // A hold means a PERSON decides, in the console or from Slack or Teams.
     // It never means asking the developer sitting here: approving your own hold
@@ -141,14 +165,19 @@ async function main () {
     if (tenantMsg) return decide('deny', 'denied', `${tenantMsg}${tag}`);
     // An action outside the mandate is an authority outcome, not an approval
     // nobody answered; saying "step-up not approved" misread the commonest refusal.
-    if (authority) return decide('deny', 'denied', `Clevr did not run this: ${reason} Authorize the tool in the mandate, or have someone approve this action in the console.${tag}`);
-    return decide('deny', 'denied', `Clevr did not run this. It needs a human decision, and this gate answers in seconds so it cannot wait for one: ${reason}${tag}`);
+    if (authority) return decide('deny', 'denied', `Clevr did not run this: ${reason} Authorize the tool in the mandate, or have someone approve this action in the console and then run exactly the same call again.${tag}`);
+    return decide('deny', 'denied', `Clevr did not run this. It needs a human decision, and this gate answers in seconds so it cannot wait for one: ${reason} Once someone has approved it, make exactly the same call again and it will go through.${tag}`);
   }
   if (cfg.autoApprove) out('allow', `Clevr allowed this action${tag}`);  // allow: no enforcement claim to confirm
   out(null);  // additive: let Cursor's normal permission flow proceed
 }
 
 main().catch((e) => {
-  process.stderr.write(`[clevr] gate error: ${e.message}; allowing.\n`);
-  out(null);
+  // A hook-internal error is the gate failing to complete, like an unreachable
+  // engine, so it obeys the SAME fail policy instead of unconditionally allowing:
+  // under a fail-closed workspace a post-verdict crash denies rather than letting
+  // the tool run ungoverned. Fail-open orgs (and cold-start hooks) still proceed.
+  const closed = effectiveFailsafe(cfg) === 'closed';
+  process.stderr.write(`[clevr] gate error: ${e.message}; ${closed ? 'denying (fail-closed per policy)' : 'allowing (fail-open per policy)'}.\n`);
+  out(closed ? 'deny' : null, closed ? `Clevr gate error; failing closed per policy: ${e.message}` : undefined);
 });

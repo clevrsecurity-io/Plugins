@@ -9,7 +9,7 @@
 // beforeSubmitPrompt honours `continue: false`, so unlike Copilot's prompt event
 // this one can genuinely stop the message, and `user_message` says why.
 import { readFileSync } from 'node:fs';
-import { loadConfig, postEvaluate, promptBody } from './clevr-common.mjs';
+import { loadConfig, postPrompt, promptBody } from './clevr-common.mjs';
 
 const allow = () => process.exit(0);
 function stop (message) {
@@ -27,13 +27,19 @@ async function main () {
   const prompt = hook.prompt ?? '';
   if (!String(prompt).trim()) allow();
 
-  const res = await postEvaluate(cfg, promptBody(cfg, {
+  const res = await postPrompt(cfg, promptBody(cfg, {
     prompt,
     sessionId: hook.conversation_id || hook.generation_id || null,
     cwd: hook.workspace_roots?.[0] || hook.cwd || null,
     source: 'cursor',
   }));
   if (res.inactive) allow();
+  // This workspace records prompts without gating them: the verdict could not
+  // have refused anything, so the turn goes back without waiting for it.
+  if (res.ungated) {
+    if (!res.sent) process.stderr.write('[clevr] engine unreachable; this workspace records prompts without gating them, so the prompt proceeds unrecorded.\n');
+    allow();
+  }
   if (res.failclosed) stop(res.reason);
   if (res.failopen) {
     process.stderr.write(`[clevr] engine error (${res.reason}); allowing (fail-open).\n`);

@@ -19,7 +19,7 @@
           {
             "type": "command",
             "command": "node ~/.clevr/tools/codex/clevr-codex-prompt.mjs",
-            "timeout": 10,
+            "timeout": 20,
             "statusMessage": "Clevr: scanning the prompt"
           }
         ]
@@ -32,7 +32,7 @@
           {
             "type": "command",
             "command": "node ~/.clevr/tools/codex/clevr-codex-gate.mjs",
-            "timeout": 10,
+            "timeout": 20,
             "statusMessage": "Clevr: checking the tool call"
           }
         ]
@@ -45,7 +45,7 @@
           {
             "type": "command",
             "command": "node ~/.clevr/tools/codex/clevr-codex-result.mjs",
-            "timeout": 10,
+            "timeout": 20,
             "statusMessage": "Clevr: scanning the result"
           }
         ]
@@ -57,7 +57,7 @@
           {
             "type": "command",
             "command": "node ~/.clevr/tools/codex/clevr-codex-subagent.mjs",
-            "timeout": 10,
+            "timeout": 20,
             "statusMessage": "Clevr: recording the sub-agent"
           }
         ]
@@ -69,7 +69,7 @@
           {
             "type": "command",
             "command": "node ~/.clevr/tools/codex/clevr-codex-stop.mjs",
-            "timeout": 10,
+            "timeout": 20,
             "statusMessage": "Clevr: recording the reply"
           }
         ]
