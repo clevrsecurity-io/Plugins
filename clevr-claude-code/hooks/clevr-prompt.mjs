@@ -24,7 +24,7 @@
 // from the conversation — it gets fully scanned without spurious verb blocks.
 
 import { readFileSync } from 'node:fs';
-import { trunc, loadConfig, readConversation, postPrompt, actsFor, typedSkillsIn, gateSkillLoads } from './clevr-common.mjs';
+import { trunc, loadConfig, readConversation, postPrompt, actsFor, typedSkillsIn, gateSkillLoads, modelFields } from './clevr-common.mjs';
 
 // UserPromptSubmit: empty output (exit 0) = the prompt proceeds.
 function allow () { process.exit(0); }
@@ -96,6 +96,7 @@ async function main () {
     action: 'user prompt',           // neutral: keeps the verb safety-floor off the prose
     target: null,
     environment: cfg.env,
+    ...modelFields(cfg, transcript_path),
     session_id: session_id || null,
     on_behalf_of: actsFor(cwd),      // the person who typed it, as the tool gate sends it
     session_goal: firstUser ? trunc(firstUser.content, 300) : null,

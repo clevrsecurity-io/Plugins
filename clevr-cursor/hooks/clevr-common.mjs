@@ -10,12 +10,13 @@ const require_ = createRequire(import.meta.url)
 // the two never drift. No dependencies — Node is already present wherever Claude
 // Code runs.
 
-import { readFileSync, writeFileSync, openSync, readSync, fstatSync, closeSync, readdirSync, lstatSync, existsSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { readFileSync, writeFileSync, openSync, readSync, fstatSync, closeSync, readdirSync, lstatSync, existsSync, mkdirSync, rmSync, renameSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { tmpdir, userInfo, hostname, homedir } from 'node:os';
-import { join, dirname, basename, relative, resolve, isAbsolute } from 'node:path';
+import { join, dirname, basename, relative, resolve, isAbsolute, sep } from 'node:path';
 import http from 'node:http';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import https from 'node:https';
 
 // Disk cache of the workspace/per-agent fail policy. These hooks are SHORT-LIVED
@@ -277,6 +278,35 @@ function readTail (path, bytes) {
     return s;
   } finally { closeSync(fd); }
 }
+// The model that answered last, read from the transcript's tail: Claude Code's
+// hook input never names it, so every agent read "model unknown" in the
+// console (a tester, 2026-10-08). An assistant line carries message.model.
+export function transcriptModel (path) {
+  if (!path) return null;
+  try {
+    const lines = readTail(path, 256 * 1024).trim().split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+      let e; try { e = JSON.parse(lines[i]); } catch { continue; }
+      const m = e && e.message;
+      if (m && m.role === 'assistant' && typeof m.model === 'string' && m.model.trim()) return m.model.trim();
+    }
+  } catch { /* no transcript, no model: the console says so */ }
+  return null;
+}
+// Who serves the model, by harness: the hook knows the harness, the harness
+// knows its provider. A harness that can route to several says nothing.
+export function providerOf (source) {
+  const s = String(source || '').toLowerCase();
+  if (s === 'claude-code' || s === 'claude-desktop') return 'anthropic';
+  if (s === 'codex') return 'openai';
+  return null;
+}
+// The two fields, once, for every body a hook sends.
+export function modelFields (cfg, transcriptPath) {
+  const model = transcriptModel(transcriptPath);
+  const provider = providerOf(cfg && cfg.source);
+  return { ...(model ? { model } : {}), ...(provider ? { provider } : {}) };
+}
 export function readConversation (path, max = 6) {
   try {
     const lines = readTail(path, TRANSCRIPT_TAIL_BYTES).trim().split('\n');
@@ -434,6 +464,31 @@ export function postUnwatched (cfg, body) {
   });
 }
 
+// A record that must land after the hook has exited. postUnwatched resolved when
+// the bytes were flushed, and the hook then exited: over TLS the write had not
+// finished its handshake, and one prompt in ten reached the engine (a tester's
+// instance kept 4 prompts of three sessions, 2026-10-08). A detached child
+// process sends the record and waits for the answer; the hook does not wait
+// for the child. The body rides in a file only this user can read, which the
+// child deletes on reading.
+export function postDetached (cfg, body) {
+  if (!cfg.apiKey) return false;
+  try {
+    const file = join(tmpdir(), `clevr-send-${process.pid}-${randomBytes(6).toString('hex')}.json`);
+    writeFileSync(file, JSON.stringify({ url: `${cfg.base}/v1/evaluate`, apiKey: cfg.apiKey, body }), { mode: 0o600 });
+    const sender = join(dirname(fileURLToPath(import.meta.url)), 'clevr-send.mjs');
+    // An install that did not ship the sender (an older installer copied the
+    // shared helpers alone) sends the record the older way instead of spawning
+    // a script that is not there and calling the record sent.
+    if (!existsSync(sender)) return false;
+    const child = spawn(process.execPath, [sender, file], { detached: true, stdio: 'ignore', windowsHide: true });
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // The prompt path, once, for every harness.
 //
 // Three of the five gates refused a prompt on an unreachable engine even where
@@ -441,7 +496,7 @@ export function postUnwatched (cfg, body) {
 // one hook instead of here. Both cases now answer the same way: `ungated` means
 // the prompt proceeds, and `sent` says whether the record left this machine.
 export async function postPrompt (cfg, body) {
-  if (promptsUngatedRecently(cfg.agent)) return { ungated: true, sent: await postUnwatched(cfg, body) };
+  if (promptsUngatedRecently(cfg.agent)) return { ungated: true, sent: postDetached(cfg, body) || await postUnwatched(cfg, body) };
   const res = await postEvaluate({ ...cfg, timeoutMs: cfg.promptTimeoutMs }, body);
   if (res.failclosed && readGatePromptsCache(cfg.agent) === false) return { ungated: true, sent: false };
   return res;
@@ -634,7 +689,10 @@ export function evidenceRefs (context, toolInput) {
 const SKILL_MAX_FILES = 200;
 const SKILL_MAX_BYTES = 5 * 1024 * 1024;
 const SKILL_TEXT_MAX = 64 * 1024;
-const SKILL_SKIP = new Set(['.git', 'node_modules', '.DS_Store']);
+// The marker the plugin writes into a skill Clevr distributed is not part of
+// the skill: left out, the folder's fingerprint is the one Clevr published.
+const SKILL_MARKER = '.clevr-skill.json';
+const SKILL_SKIP = new Set(['.git', 'node_modules', '.DS_Store', SKILL_MARKER]);
 // The brain's own rule (lib/skills.js): letters, digits, dash, underscore, dot
 // and the namespace colon; nothing that reads as a path.
 const SKILL_NAME = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/;
@@ -810,7 +868,9 @@ function describeLocated (name, loc, { sensitive = false } = {}) {
   const { files, partial } = collectSkillFiles(loc);
   if (!files.length) return { ...out, origin: loc.origin };
   const fingerprint = createHash('sha256').update(files.map((f) => `${f.path}\0${f.sha256}\n`).join('')).digest('hex');
-  const desc = { ...out, origin: loc.origin, ...(loc.plugin ? { plugin: loc.plugin } : {}), fingerprint, files, ...(partial ? { partial: true } : {}) };
+  // A folder the plugin wrote as Clevr distributed it says so.
+  const origin = loc.kind === 'folder' && existsSync(join(loc.root, SKILL_MARKER)) ? 'clevr' : loc.origin;
+  const desc = { ...out, origin, ...(loc.plugin ? { plugin: loc.plugin } : {}), fingerprint, files, ...(partial ? { partial: true } : {}) };
   if (sensitive) return desc;
   const text = readFileSync(loc.main, 'utf8');
   return { ...desc, description: skillDescriptionOf(text), text: text.slice(0, SKILL_TEXT_MAX), ...(text.length > SKILL_TEXT_MAX ? { text_truncated: true } : {}) };
@@ -996,4 +1056,103 @@ export async function gateSkillLoads (cfg, loads, { honorShadow = false, recordO
     return { message };
   }
   return flagged;
+}
+
+// ── Skills Clevr distributes ────────────────────────────────────────────────
+// An administrator publishes a skill in Clevr; every agent whose mandate names
+// it receives that approved version. At the start of a session the plugin asks
+// which skills those are (POST /v1/skills/sync) and writes their files where
+// the harness reads a person's skills: ~/.claude/skills for Claude Code, and
+// ~/.agents/skills, which Codex, Cursor, Copilot and Gemini CLI all read.
+//   - A folder it writes carries a marker; it never touches one without it, so
+//     a person's own skill of the same name stays theirs.
+//   - What is on disk is fingerprinted and sent: a distributed skill edited on
+//     the machine is a version of its own, and Clevr hands the approved files
+//     back, which restores it.
+//   - A skill Clevr no longer distributes to this agent leaves the machine.
+// Bounded and best-effort: an engine that does not answer in time leaves the
+// machine as it was, and the session starts anyway. CLEVR_SKILLS_SYNC=0 turns
+// it off.
+const DIST_FOLDER = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/;
+export function distributedSkillsDir (harness, home = homedir()) {
+  return harness === 'claude-code' ? join(home, '.claude', 'skills') : join(home, '.agents', 'skills');
+}
+
+// The skills this machine holds as Clevr distributed them, with the
+// fingerprint of what is on disk now ('' when it cannot be read).
+export function distributedSkillsHeld (dir) {
+  const out = {};
+  let names = [];
+  try { names = readdirSync(dir); } catch { return out; }
+  for (const n of names) {
+    const d = join(dir, n);
+    if (!DIST_FOLDER.test(n) || !existsSync(join(d, SKILL_MARKER))) continue;
+    try { out[n] = describeLocated(n, { kind: 'folder', root: d, main: join(d, 'SKILL.md'), origin: 'clevr' }).fingerprint || ''; }
+    catch { out[n] = ''; }
+  }
+  return out;
+}
+
+// Write one distributed skill: built beside the target, checked against the
+// fingerprint Clevr sent, then swapped in. 'written' | 'conflict' | 'mismatch'.
+function writeDistributedSkill (dir, skill) {
+  const final = join(dir, skill.name);
+  if (existsSync(final) && !existsSync(join(final, SKILL_MARKER))) return 'conflict';
+  const tmp = join(dir, `.clevr-tmp-${skill.name}-${process.pid}`);
+  rmSync(tmp, { recursive: true, force: true });
+  mkdirSync(tmp, { recursive: true });
+  try {
+    for (const f of skill.files) {
+      const parts = String(f && f.path || '').split('/');
+      if (!parts.length || parts.some((x) => !x || x === '.' || x === '..' || x.includes('\\') || x.includes('\0'))) throw new Error('a path outside the skill');
+      const abs = join(tmp, ...parts);
+      if (!abs.startsWith(tmp + sep)) throw new Error('a path outside the skill');
+      mkdirSync(dirname(abs), { recursive: true });
+      writeFileSync(abs, Buffer.from(String(f.content || ''), 'base64'), { mode: 0o644 });
+    }
+    writeFileSync(join(tmp, SKILL_MARKER), JSON.stringify({ distributed_by: 'clevr', name: skill.name, fingerprint: skill.fingerprint, at: new Date().toISOString() }) + '\n', { mode: 0o644 });
+    const got = describeLocated(skill.name, { kind: 'folder', root: tmp, main: join(tmp, 'SKILL.md'), origin: 'clevr' }).fingerprint;
+    if (got !== skill.fingerprint) { rmSync(tmp, { recursive: true, force: true }); return 'mismatch'; }
+    rmSync(final, { recursive: true, force: true });
+    renameSync(tmp, final);
+    return 'written';
+  } catch (e) {
+    rmSync(tmp, { recursive: true, force: true });
+    throw e;
+  }
+}
+
+export async function syncDistributedSkills (cfg, { harness = 'claude-code', home = homedir(), timeoutMs = 2500 } = {}) {
+  const result = { changed: false, written: [], removed: [], conflicts: [] };
+  if (!cfg || !cfg.apiKey || process.env.CLEVR_SKILLS_SYNC === '0') return result;
+  const dir = distributedSkillsDir(harness, home);
+  const have = distributedSkillsHeld(dir);
+  let answer = null;
+  try {
+    const r = await httpPostJson(`${cfg.base}/v1/skills/sync`, {
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
+      body: JSON.stringify({ agent: cfg.agent, runtime: cfg.source, have }),
+      timeoutMs,
+    });
+    if (r.status < 200 || r.status >= 300) return result;
+    answer = JSON.parse(r.body);
+  } catch { return result; }
+  if (!answer || !Array.isArray(answer.skills)) return result;
+  const keep = new Set();
+  for (const s of answer.skills.slice(0, 100)) {
+    if (!s || typeof s.name !== 'string' || !DIST_FOLDER.test(s.name) || typeof s.fingerprint !== 'string') continue;
+    keep.add(s.name);
+    if (!Array.isArray(s.files)) continue;   // already held as distributed
+    try {
+      mkdirSync(dir, { recursive: true });
+      const w = writeDistributedSkill(dir, s);
+      if (w === 'written') { result.written.push(s.name); result.changed = true; }
+      else if (w === 'conflict') result.conflicts.push(s.name);
+    } catch { /* this one stays as it was */ }
+  }
+  for (const name of Object.keys(have)) {
+    if (keep.has(name)) continue;
+    try { rmSync(join(dir, name), { recursive: true, force: true }); result.removed.push(name); result.changed = true; } catch { /* stays */ }
+  }
+  return result;
 }

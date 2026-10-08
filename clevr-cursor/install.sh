@@ -26,6 +26,8 @@ command -v node >/dev/null 2>&1 || { echo "Node 18+ is required (the hooks run u
 mkdir -p "$DEST"
 cp "$SRC/clevr-gate.mjs" "$SRC/clevr-prompt.mjs" "$SRC/clevr-result.mjs" "$SRC/clevr-answer.mjs" "$DEST/"
 cp "$COMMON" "$DEST/clevr-common.mjs"
+# The sender the shared helpers start to deliver a record after the hook exits.
+[ -f "$(dirname "$COMMON")/clevr-send.mjs" ] && cp "$(dirname "$COMMON")/clevr-send.mjs" "$DEST/"
 chmod +x "$DEST"/clevr-*.mjs
 echo "Installed hook scripts to $DEST"
 

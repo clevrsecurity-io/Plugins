@@ -21,7 +21,7 @@
 // changed: this hook now sends what the answer hooks send.
 
 import { readFileSync } from 'node:fs';
-import { trunc, loadConfig, readConversation, postEvaluate, answerBody } from './clevr-common.mjs';
+import { trunc, loadConfig, readConversation, postEvaluate, answerBody, modelFields } from './clevr-common.mjs';
 
 // Record-only: always let the turn finish. We never emit a `decision`, so the
 // model is never forced to continue.
@@ -63,6 +63,7 @@ async function main () {
     source: cfg.source,
   });
   body.metadata.event = 'assistant-reply';
+  Object.assign(body, modelFields(cfg, transcript_path));
   if (prompt) {
     body.session_goal = trunc(prompt.content, 300);
     body.conversation = [prompt, reply];

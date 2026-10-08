@@ -22,7 +22,7 @@
 // clevr-common.mjs for the full CLEVR_* list.
 
 import { readFileSync } from 'node:fs';
-import { trunc, loadConfig, readConversation, postEvaluate, confirmEnforcement, machineContext, evidenceRefs, actsFor, rememberedHold, rememberHold, effectiveFailsafe, describeSkill, skillLoadsIn, gateSkillLoads } from './clevr-common.mjs';
+import { trunc, loadConfig, readConversation, postEvaluate, confirmEnforcement, machineContext, evidenceRefs, actsFor, rememberedHold, rememberHold, effectiveFailsafe, describeSkill, skillLoadsIn, gateSkillLoads, modelFields } from './clevr-common.mjs';
 
 function out (decision, reason) {
   if (decision) {
@@ -89,6 +89,9 @@ async function main () {
   const body = {
     agent: cfg.agent, tool: tool_name, action_type, action, target,
     environment: cfg.env,
+    // The model that is driving, read from the transcript's tail, and the
+    // provider the harness implies (clevr-common.mjs modelFields).
+    ...modelFields(cfg, transcript_path),
     // Machine context for the brain's environment classifier (branch, kube
     // context, cloud profile). Corroboration only; the brain derives the class.
     context: machineContext(cwd),

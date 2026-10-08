@@ -1,8 +1,8 @@
 {
   "name": "clevr-gate",
   "displayName": "Clevr Gate",
-  "description": "Govern Claude Code through Clevr's runtime policy engine: gate every tool call and every skill it loads, scan every prompt, every tool result and every reply before or as it happens. Allow, hold, or block, with a signed receipt. /clevr-gate:status says where you stand.",
-  "version": "1.3.0",
+  "description": "Govern Claude Code through Clevr's runtime policy engine: gate every tool call and every skill it loads, install the skills your workspace distributes, scan every prompt, every tool result and every reply before or as it happens. Allow, hold, or block, with a signed receipt. /clevr-gate:status says where you stand.",
+  "version": "1.4.0",
   "author": {
     "name": "Clevr Security",
     "email": "support@clevrsecurity.com"

@@ -138,7 +138,9 @@ A skill or command typed at the start of a message expands without the `Skill` t
 
 **`SessionStart` — the ground rules (`hooks/clevr-session.mjs`), fires once per session:**
 
-Tells the model its actions are governed, that a refusal is a decision and not a tool failure, and that it should report a block rather than look for another route to the same effect. Without it, a model meets its first block as an unexplained failure, and the ordinary response to a failure is to try another way. No network call, so a session never waits on the engine to start. `CLEVR_SESSION_CONTEXT=0` turns it off.
+Tells the model its actions are governed, that a refusal is a decision and not a tool failure, and that it should report a block rather than look for another route to the same effect. Without it, a model meets its first block as an unexplained failure, and the ordinary response to a failure is to try another way. `CLEVR_SESSION_CONTEXT=0` turns it off.
+
+It also installs the skills your workspace distributes: one call to the engine, bounded to a couple of seconds, after which the session starts whatever it answered. The approved files of the skills the agent's mandate names go to `~/.claude/skills` (`~/.agents/skills` for Codex), and Claude Code reads them from the first prompt. A skill of your own with the same name is never overwritten; one the workspace no longer distributes to this agent is removed. `CLEVR_SKILLS_SYNC=0` turns it off.
 
 Together the hooks give the GUARD path a full picture of a turn: the prompt that came in, the actions it drove, what those actions brought back, and the reply that went out.
 

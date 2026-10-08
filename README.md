@@ -11,8 +11,9 @@ Govern Claude Code and Claude Desktop through Clevr's policy engine. Seven
 hooks: every prompt, every skill or command typed as `/name`, every tool call
 before it runs, every tool result, every reply, sub-agents, and the ground
 rules at session start. Each skill the agent loads is checked as that skill,
-with the version found on the machine. `/clevr-gate:status` says which engine
-governs the session, in which mode, and what it last decided.
+with the version found on the machine, and the skills your workspace
+distributes are installed at the start of each session. `/clevr-gate:status`
+says which engine governs the session, in which mode, and what it last decided.
 
 Install it in one command:
 
@@ -54,7 +55,8 @@ Govern Codex, and the ChatGPT desktop app, which runs the same Codex locally.
 Six hooks, the ones Claude Code shares with Codex: the prompt, every tool call
 before it runs, every tool result, sub-agents, the reply, and the ground rules
 at session start. A skill Codex opens, or one you type as `$name`, is checked
-as that skill. The hooks are shims over the Claude Code ones, so there is one
+as that skill, and the skills your workspace distributes are installed at the
+start of each session. The hooks are shims over the Claude Code ones, so there is one
 implementation.
 
 ```
