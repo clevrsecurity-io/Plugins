@@ -7,10 +7,12 @@ reroute, no code change to the agent.
 
 ## clevr-claude-code
 
-Govern Claude Code and Claude Desktop through Clevr's policy engine. Six hooks:
-every prompt, every tool call before it runs, every tool result, every reply,
-sub-agents, and the ground rules at session start. `/clevr-gate:status` says
-which engine governs the session, in which mode, and what it last decided.
+Govern Claude Code and Claude Desktop through Clevr's policy engine. Seven
+hooks: every prompt, every skill or command typed as `/name`, every tool call
+before it runs, every tool result, every reply, sub-agents, and the ground
+rules at session start. Each skill the agent loads is checked as that skill,
+with the version found on the machine. `/clevr-gate:status` says which engine
+governs the session, in which mode, and what it last decided.
 
 Install it in one command:
 
@@ -35,7 +37,8 @@ promote it from the console. Full setup, configuration and rollout are in
 Govern the Cursor Agent (Composer) through the same engine, with four hooks
 inside the agent loop: the prompt you send, every tool about to run, what it
 returned, and the reply. A prompt or a tool call is stopped before it happens;
-a result and a reply are scanned and reported.
+a result and a reply are scanned and reported. A skill the agent opens, or one
+you type as `/name`, is checked as that skill.
 
 ```
 git clone https://github.com/clevrsecurity-io/Plugins
@@ -48,9 +51,10 @@ setup in [clevr-cursor/README.md](clevr-cursor/README.md).
 ## clevr-codex
 
 Govern Codex, and the ChatGPT desktop app, which runs the same Codex locally.
-Six hooks, the same six as Claude Code: the prompt, every tool call before it
-runs, every tool result, sub-agents, the reply, and the ground rules at session
-start. The hooks are shims over the Claude Code ones, so there is one
+Six hooks, the ones Claude Code shares with Codex: the prompt, every tool call
+before it runs, every tool result, sub-agents, the reply, and the ground rules
+at session start. A skill Codex opens, or one you type as `$name`, is checked
+as that skill. The hooks are shims over the Claude Code ones, so there is one
 implementation.
 
 ```

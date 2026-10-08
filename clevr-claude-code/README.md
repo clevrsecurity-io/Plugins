@@ -105,13 +105,14 @@ it starts with no shell environment at all. An exported key still wins.
 
 ## How it works
 
-The plugin registers six hooks and one command (Node, no dependencies; shared helpers in `hooks/clevr-common.mjs`):
+The plugin registers seven hooks and one command (Node, no dependencies; shared helpers in `hooks/clevr-common.mjs`):
 
 **`PreToolUse` — the action gate (`hooks/clevr-gate.mjs`), matches every tool (`"matcher": "*"`):**
 
 1. Reads the tool call from stdin and maps it to an engine action (`Bash` to `exec`, `Write`/`Edit` to `write`, `Read` to `read`, `mcp__*` to `tool_call`, and so on). The command, path, or arguments are sent as the action text so the deterministic content floor can scan them.
 2. Optionally reads the recent conversation from the transcript and the session id, so the same gate that governs the action also gives it meaning in the session.
 3. Calls `POST /v1/evaluate` and translates the verdict to `allow` or `deny`. There is no `ask`: a hold is decided in Clevr, never by the person at this keyboard.
+4. Skills: a load through the `Skill` tool is governed as `skill:<name>`, with the version this machine holds (a fingerprint over every file of the skill, and its text unless `CLEVR_SENSITIVE=1`). A skill's `SKILL.md` opened another way, with `Read` or a shell command, is asked first as that skill: if the skill may not load, the call does not run.
 
 **`UserPromptSubmit` — the prompt scanner (`hooks/clevr-prompt.mjs`), fires on every prompt:**
 
@@ -119,6 +120,10 @@ The plugin registers six hooks and one command (Node, no dependencies; shared he
 2. In Enforce, a prompt that trips the content floor is refused before the model sees it; in Observe it is recorded, signed with what would have happened, and proceeds. Skipped under `CLEVR_SENSITIVE=1`.
 
 The prompt rides in the conversation field (which the content detectors scan), not the action field (which the verb safety-floor classifies), so ordinary words like "delete" or "send" in a prompt never misfire as destructive actions.
+
+**`UserPromptExpansion`, typed skills and commands (`hooks/clevr-expand.mjs`), fires when a person types `/name`:**
+
+A skill or command typed at the start of a message expands without the `Skill` tool, so `PreToolUse` never sees it. This hook asks Clevr about it as the same skill, with its version: Allow expands it, Hold and Block stop it and the person reads why. A prompt from an MCP server is not a skill and passes.
 
 **`Stop` — the reply recorder (`hooks/clevr-stop.mjs`), fires when the model finishes a turn:**
 

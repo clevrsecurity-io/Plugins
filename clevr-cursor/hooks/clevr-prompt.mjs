@@ -9,7 +9,7 @@
 // beforeSubmitPrompt honours `continue: false`, so unlike Copilot's prompt event
 // this one can genuinely stop the message, and `user_message` says why.
 import { readFileSync } from 'node:fs';
-import { loadConfig, postPrompt, promptBody } from './clevr-common.mjs';
+import { loadConfig, postPrompt, promptBody, typedSkillsIn, gateSkillLoads } from './clevr-common.mjs';
 
 const allow = () => process.exit(0);
 function stop (message) {
@@ -22,15 +22,26 @@ async function main () {
   try { hook = JSON.parse(readFileSync(0, 'utf8')); } catch { allow(); }
 
   const cfg = loadConfig('cursor');
-  if (!cfg.apiKey || cfg.sensitive) allow();
+  if (!cfg.apiKey) allow();
 
   const prompt = hook.prompt ?? '';
+  const cwd = hook.workspace_roots?.[0] || hook.cwd || null;
+  // A skill typed as /name attaches to the message itself, with no tool call
+  // for the gate to see (cursor.com/docs/skills), so it is asked here. Only the
+  // name and the version leave this machine, so confidential mode runs it too.
+  const typed = typedSkillsIn(prompt, cwd, { harness: 'cursor' });
+  if (typed.length) {
+    const s = await gateSkillLoads(cfg, typed, { sessionId: hook.conversation_id || hook.generation_id || null, cwd, via: 'typed', honorShadow: true });
+    if (s) stop(s.message);
+  }
+  if (cfg.sensitive) allow();
+
   if (!String(prompt).trim()) allow();
 
   const res = await postPrompt(cfg, promptBody(cfg, {
     prompt,
     sessionId: hook.conversation_id || hook.generation_id || null,
-    cwd: hook.workspace_roots?.[0] || hook.cwd || null,
+    cwd,
     source: 'cursor',
   }));
   if (res.inactive) allow();

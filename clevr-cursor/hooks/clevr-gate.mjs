@@ -22,7 +22,7 @@
 // a JSON decision on stdout. Exit 0 with no JSON is an additive no-op.
 
 import { readFileSync } from 'node:fs';
-import { trunc, loadConfig, postEvaluate, confirmEnforcement, actsFor, rememberedHold, rememberHold, machineContext, evidenceRefs, effectiveFailsafe } from './clevr-common.mjs';
+import { trunc, loadConfig, postEvaluate, confirmEnforcement, actsFor, rememberedHold, rememberHold, machineContext, evidenceRefs, effectiveFailsafe, skillLoadsIn, gateSkillLoads } from './clevr-common.mjs';
 
 // permission ∈ 'allow' | 'deny' | 'ask'. null => print nothing (additive no-op),
 // so Cursor's normal flow proceeds unchanged (used for allow + shadow).
@@ -99,6 +99,16 @@ async function main () {
       : { input: toolInput, cwd: hook.cwd || null, source: 'cursor', cursor_version: hook.cursor_version || null },
     ...(cfg.sensitive ? { sensitive: true } : {}),
   };
+  // A skill's instructions the agent opens (its SKILL.md, read or `cat`): the
+  // load is asked first, as its own action, and the call runs only if it may.
+  // This machine's CLEVR_MODE=shadow records it and never stops it.
+  const cwd = hook.cwd || hook.workspace_roots?.[0] || null;
+  const loads = skillLoadsIn(toolName, toolInput, cwd);
+  if (loads.length) {
+    const stop = await gateSkillLoads(cfg, loads, { sessionId: hook.conversation_id || null, cwd, byTool: toolName, honorShadow: true });
+    if (stop) out('deny', stop.message);
+  }
+
   // Minimal context: Cursor hands preToolUse the assistant's current message.
   if (!cfg.sensitive && cfg.forwardCtx && hook.agent_message) {
     body.conversation = [{ role: 'assistant', content: trunc(hook.agent_message, 1000) }];

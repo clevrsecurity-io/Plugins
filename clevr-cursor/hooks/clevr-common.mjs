@@ -10,10 +10,10 @@ const require_ = createRequire(import.meta.url)
 // the two never drift. No dependencies — Node is already present wherever Claude
 // Code runs.
 
-import { readFileSync, writeFileSync, openSync, readSync, fstatSync, closeSync } from 'node:fs';
+import { readFileSync, writeFileSync, openSync, readSync, fstatSync, closeSync, readdirSync, lstatSync, existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir, userInfo, hostname, homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname, basename, relative, resolve, isAbsolute } from 'node:path';
 import http from 'node:http';
 import { createHash } from 'node:crypto';
 import https from 'node:https';
@@ -609,4 +609,391 @@ export function evidenceRefs (context, toolInput) {
   const out = new Set()
   for (const t of texts) for (const m of String(t).matchAll(/\b([A-Z][A-Z0-9_]{1,15}-\d{1,8})\b/g)) out.add(m[1])
   return [...out].slice(0, 5).map((ref) => ({ kind: 'ticket', ref }))
+}
+
+// ── Skills ───────────────────────────────────────────────────────────────────
+// A skill is a folder holding a SKILL.md, sometimes with scripts beside it: the
+// instructions an agent loads to do a task its way. Clevr governs every load as
+// skill:<name> (brain lib/skills.js), against the mandate and the version an
+// administrator approved, and keeps the workspace's inventory. Each harness
+// loads one its own way, and each way is read here:
+//   - a tool made for it: Claude Code's Skill {"skill":"pdf"} and Gemini CLI's
+//     activate_skill {"name":"pdf"}. The brain names that call by the skill.
+//   - the agent opening the SKILL.md itself: Codex runs `cat .../SKILL.md` (its
+//     own session logs, 2026-10-01), and any agent can Read the file. The load
+//     is asked first, as its own action (gateSkillLoads).
+//   - a person typing it: Claude Code's /name reaches UserPromptExpansion, never
+//     PreToolUse (clevr-expand.mjs); Codex's $name and Cursor's /name sit in the
+//     prompt (typedSkillsIn).
+// The content is fingerprinted where it lies: sha256 over every file's path and
+// content, so a changed script is a new version as surely as a changed SKILL.md.
+// These helpers live in this file because it is the one every installer ships:
+// a helper in a file of its own crashed the gate wherever an installer did not
+// copy it, and a crashed hook lets the call through.
+
+const SKILL_MAX_FILES = 200;
+const SKILL_MAX_BYTES = 5 * 1024 * 1024;
+const SKILL_TEXT_MAX = 64 * 1024;
+const SKILL_SKIP = new Set(['.git', 'node_modules', '.DS_Store']);
+// The brain's own rule (lib/skills.js): letters, digits, dash, underscore, dot
+// and the namespace colon; nothing that reads as a path.
+const SKILL_NAME = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/;
+const skillNameOk = (n) => typeof n === 'string' && SKILL_NAME.test(n) && !n.includes('..');
+// Byte order, not the machine's locale: the same skill has the same fingerprint
+// on every machine that loads it.
+const byCode = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+const slashed = (p) => String(p).split('\\').join('/');
+
+// Claude Code's managed settings directory: an administrator's skills there
+// outrank a person's own (code.claude.com/docs/en/managed-settings).
+function claudeManagedDir () {
+  if (process.platform === 'darwin') return '/Library/Application Support/ClaudeCode';
+  if (process.platform === 'win32') return 'C:\\Program Files\\ClaudeCode';
+  return '/etc/claude-code';
+}
+
+// The working directory and its parents up to the repository root, nearest
+// first: project skills are read from each. Outside a repository, the working
+// directory alone.
+function projectDirs (cwd) {
+  if (!cwd) return [];
+  const out = [];
+  let d = resolve(cwd);
+  for (let i = 0; i < 12; i++) {
+    out.push(d);
+    if (existsSync(join(d, '.git'))) return out;
+    const up = dirname(d);
+    if (up === d) break;
+    d = up;
+  }
+  return [resolve(cwd)];
+}
+
+// Where each harness looks for a skill by name, in the order a name resolves:
+// the first folder holding it wins. From each harness's own documentation.
+function skillRoots (harness, cwd, home) {
+  const proj = (sub) => projectDirs(cwd).map((d) => ({ dir: join(d, sub), origin: 'project' }));
+  const user = (sub) => ({ dir: join(home, sub), origin: 'user' });
+  switch (harness) {
+    case 'codex':
+      return [...proj('.agents/skills'), user('.agents/skills'), user('.codex/skills'),
+        { dir: '/etc/codex/skills', origin: 'managed' }, { dir: join(home, '.codex/skills/.system'), origin: 'built_in' }];
+    case 'cursor':
+      return [...proj('.agents/skills'), ...proj('.cursor/skills'), ...proj('.claude/skills'), ...proj('.codex/skills'),
+        user('.agents/skills'), user('.cursor/skills'), user('.claude/skills'), user('.codex/skills')];
+    case 'gemini-cli':
+      // A workspace's skill outranks a person's own in Gemini CLI.
+      return [...proj('.gemini/skills'), ...proj('.agents/skills'), user('.gemini/skills'), user('.agents/skills')];
+    case 'github-copilot':
+      return [...proj('.github/skills'), ...proj('.claude/skills'), ...proj('.agents/skills'), user('.copilot/skills'), user('.agents/skills')];
+    default:
+      // Claude Code: "Enterprise over personal, and personal over project".
+      return [{ dir: join(claudeManagedDir(), '.claude', 'skills'), origin: 'managed' }, user('.claude/skills'), ...proj('.claude/skills')];
+  }
+}
+
+// The installed copies of a plugin: Claude Code's own registry, then Codex's
+// plugin cache, which has the same layout (cache/<marketplace>/<plugin>/<version>).
+function pluginRoots (plugin, home) {
+  const out = [];
+  try {
+    const reg = JSON.parse(readFileSync(join(home, '.claude', 'plugins', 'installed_plugins.json'), 'utf8'));
+    for (const [key, entries] of Object.entries(reg.plugins || {})) {
+      if (key.split('@')[0] !== plugin) continue;
+      for (const e of (Array.isArray(entries) ? entries : [entries])) {
+        if (e && typeof e.installPath === 'string') out.push({ root: e.installPath, id: key + (e.version ? ' ' + e.version : '') });
+      }
+    }
+  } catch { /* no Claude Code registry */ }
+  try {
+    const cache = join(home, '.codex', 'plugins', 'cache');
+    for (const market of readdirSync(cache).sort(byCode)) {
+      const dir = join(cache, market, plugin);
+      if (!existsSync(dir)) continue;
+      for (const version of readdirSync(dir).sort(byCode).reverse()) out.push({ root: join(dir, version), id: `${plugin}@${market} ${version}` });
+    }
+  } catch { /* no Codex plugins */ }
+  return out;
+}
+
+// The plugin that ships a skill or command of this bare name, when exactly one
+// does: Claude Code names a typed plugin command without its plugin.
+export function pluginProviding (name, home = homedir()) {
+  try {
+    const reg = JSON.parse(readFileSync(join(home, '.claude', 'plugins', 'installed_plugins.json'), 'utf8'));
+    const hits = new Set();
+    for (const key of Object.keys(reg.plugins || {})) {
+      const plugin = key.split('@')[0];
+      for (const p of pluginRoots(plugin, home)) {
+        if (existsSync(join(p.root, 'skills', name, 'SKILL.md')) || existsSync(join(p.root, 'commands', name + '.md'))) hits.add(plugin);
+      }
+    }
+    return hits.size === 1 ? [...hits][0] : null;
+  } catch { return null; }
+}
+
+// Where a skill name points on this machine for this harness, or null.
+export function locateSkill (name, cwd, home = homedir(), harness = 'claude-code') {
+  const n = String(name || '').trim();
+  if (!n || n.includes('..') || n.includes('/') || n.includes('\\') || n.includes('\0')) return null;
+  const candidates = [];
+  const colon = n.indexOf(':');
+  if (colon > 0) {
+    const plugin = n.slice(0, colon);
+    const item = n.slice(colon + 1);
+    if (!item) return null;
+    // A namespaced command (plugin:group:item) lives at commands/group/item.md.
+    const parts = item.split(':');
+    for (const p of pluginRoots(plugin, home)) {
+      candidates.push({ origin: 'plugin', plugin: p.id, dir: join(p.root, 'skills', parts.join('-')), file: join(p.root, 'commands', ...parts) + '.md' });
+    }
+  } else {
+    for (const r of skillRoots(harness, cwd, home)) {
+      // Claude Code's commands answer to /name too, a skill first in each scope.
+      const commands = harness === 'claude-code' && r.origin !== 'managed' ? join(r.dir, '..', 'commands', n + '.md') : null;
+      candidates.push({ origin: r.origin, dir: join(r.dir, n), file: commands });
+    }
+  }
+  for (const c of candidates) {
+    if (c.dir && existsSync(join(c.dir, 'SKILL.md'))) return { origin: c.origin, plugin: c.plugin || null, kind: 'folder', root: c.dir, main: join(c.dir, 'SKILL.md') };
+    if (c.file && existsSync(c.file)) return { origin: c.origin, plugin: c.plugin || null, kind: 'file', root: c.file, main: c.file };
+  }
+  return null;
+}
+
+// Every file of a skill, in a stable order, within the budget. Symbolic links
+// are not followed: a link out of the folder is not the skill.
+function collectSkillFiles (loc) {
+  const files = [];
+  let bytes = 0, partial = false;
+  const add = (abs, rel) => {
+    if (files.length >= SKILL_MAX_FILES) { partial = true; return; }
+    const buf = readFileSync(abs);
+    if (bytes + buf.length > SKILL_MAX_BYTES) { partial = true; return; }
+    bytes += buf.length;
+    files.push({ path: rel, bytes: buf.length, sha256: createHash('sha256').update(buf).digest('hex') });
+  };
+  if (loc.kind === 'file') { add(loc.main, basename(loc.main)); return { files, partial }; }
+  const walk = (dir) => {
+    for (const ent of readdirSync(dir, { withFileTypes: true }).sort((a, b) => byCode(a.name, b.name))) {
+      if (SKILL_SKIP.has(ent.name)) continue;
+      const abs = join(dir, ent.name);
+      const st = lstatSync(abs);
+      if (st.isSymbolicLink()) continue;
+      if (st.isDirectory()) walk(abs);
+      else if (st.isFile()) add(abs, slashed(relative(loc.root, abs)));
+    }
+  };
+  walk(loc.root);
+  files.sort((a, b) => byCode(a.path, b.path));
+  return { files, partial };
+}
+
+// The description line of a SKILL.md or command file's front matter: the lines
+// between a first line "---" and the next one. Read line by line, so a large
+// file without a closing "---" costs one pass, not a backtracking search.
+function skillDescriptionOf (text) {
+  const lines = String(text).slice(0, SKILL_TEXT_MAX).split('\n').map((l) => l.replace(/\r$/, ''));
+  if (lines[0] !== '---') return null;
+  for (let i = 1; i < lines.length && lines[i] !== '---'; i++) {
+    if (!lines[i].startsWith('description:')) continue;
+    const v = lines[i].slice('description:'.length).trim().replace(/^["']|["']$/g, '');
+    return v ? v.slice(0, 500) : null;
+  }
+  return null;
+}
+
+// What a located skill is: its fingerprint and files always, its description
+// and text outside confidential mode.
+function describeLocated (name, loc, { sensitive = false } = {}) {
+  const out = { name: String(name || '').slice(0, 200) };
+  const { files, partial } = collectSkillFiles(loc);
+  if (!files.length) return { ...out, origin: loc.origin };
+  const fingerprint = createHash('sha256').update(files.map((f) => `${f.path}\0${f.sha256}\n`).join('')).digest('hex');
+  const desc = { ...out, origin: loc.origin, ...(loc.plugin ? { plugin: loc.plugin } : {}), fingerprint, files, ...(partial ? { partial: true } : {}) };
+  if (sensitive) return desc;
+  const text = readFileSync(loc.main, 'utf8');
+  return { ...desc, description: skillDescriptionOf(text), text: text.slice(0, SKILL_TEXT_MAX), ...(text.length > SKILL_TEXT_MAX ? { text_truncated: true } : {}) };
+}
+
+// What a skill load carries for the brain: always the name, and what this
+// machine can say about its content. A skill it cannot find (one built in to
+// the harness) goes by its name alone; nothing here may break a hook.
+export function describeSkill (name, cwd, { sensitive = false, home = homedir(), harness = 'claude-code' } = {}) {
+  const out = { name: String(name || '').slice(0, 200) };
+  try {
+    const loc = locateSkill(name, cwd, home, harness);
+    if (!loc) return { ...out, origin: 'unknown' };
+    return describeLocated(out.name, loc, { sensitive });
+  } catch { return out; }
+}
+
+// The skill a path to a SKILL.md belongs to: the folder holding it. A plugin's
+// skill (.../plugins/cache/<marketplace>/<plugin>/<version>/skills/<name>, the
+// layout Claude Code and Codex share) is named plugin:name, as Claude Code
+// names it, so a load read from the file and one through the Skill tool are
+// the same skill in the inventory.
+export function skillAtPath (p, cwd, home = homedir()) {
+  let s = String(p || '').trim();
+  if (!/(^|[\\/])SKILL\.md$/.test(s)) return null;
+  s = s.replace(/^\$\{?HOME\}?(?=[\\/])/, home).replace(/^~(?=[\\/])/, home);
+  const abs = isAbsolute(s) ? s : resolve(cwd || process.cwd(), s);
+  const dir = dirname(abs);
+  const folder = basename(dir);
+  if (!skillNameOk(folder) || folder.includes(':')) return null;
+  const norm = slashed(abs);
+  const m = /\/plugins\/cache\/[^/]+\/([^/]+)\/[^/]+\/skills\/[^/]+\/SKILL\.md$/.exec(norm);
+  const plugin = m && skillNameOk(m[1]) && !m[1].includes(':') ? m[1] : null;
+  const top = projectDirs(cwd).slice(-1)[0];
+  const under = (root) => !!root && norm.startsWith(slashed(root).replace(/\/$/, '') + '/');
+  const origin = plugin ? 'plugin'
+    : under(claudeManagedDir()) || under('/etc/codex/skills') ? 'managed'
+      : norm.includes('/.codex/skills/.system/') ? 'built_in'
+        : top && top !== home && under(top) ? 'project'
+          : under(home) ? 'user' : 'unknown';
+  return { name: plugin ? `${plugin}:${folder}` : folder, kind: 'folder', root: dir, main: abs, origin, plugin };
+}
+
+// The skills one SKILL.md mention reaches. A glob where the skill's folder
+// sits (cat skills/*/SKILL.md) reads every skill it matches. A file that is not
+// there loads nothing.
+function skillsAtToken (token, cwd, home) {
+  const t = slashed(token.replace(/^\$\{?HOME\}?(?=[\\/])/, home).replace(/^~(?=[\\/])/, home));
+  const parts = t.split('/');
+  const folder = parts.length >= 2 ? parts[parts.length - 2] : '';
+  if (/[*?[\]]/.test(folder)) {
+    const parent = parts.slice(0, -2).join('/') || '.';
+    const base = isAbsolute(parent) ? parent : resolve(cwd || process.cwd(), parent);
+    const re = new RegExp('^' + folder.replace(/[.+^${}()|\\]/g, '\\$&').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]') + '$');
+    let names = [];
+    try { names = readdirSync(base).filter((x) => re.test(x)).sort(byCode).slice(0, 20); } catch { return []; }
+    return names.map((x) => skillAtPath(join(base, x, 'SKILL.md'), cwd, home)).filter((l) => l && existsSync(l.main));
+  }
+  const loc = skillAtPath(t, cwd, home);
+  return loc && existsSync(loc.main) ? [loc] : [];
+}
+
+// The skills a tool call loads by opening their SKILL.md: a Read of the file,
+// `cat` in a shell, a script that opens it. A tool made for loading a skill is
+// the load itself and is named by the brain; writing a SKILL.md is editing a
+// skill, not loading one, and is left to the call's own check.
+// Listing files is not reading them: a Glob for **/SKILL.md, or `ls` and
+// `find` in a shell, names skills without loading any.
+const DIRECT_SKILL_TOOL = /^(skill|activate_skill)$/i;
+const WRITE_TOOL = /(write|edit|create|apply|patch|replace|insert|delete|remove|move|rename|mkdir|touch)/i;
+const SHELL_TOOL = /(bash|shell|terminal|exec|command|powershell|run)/i;
+const LISTING_TOOL = /^(glob|ls|list_dir|list_directory|list_files|file_search|find_by_name|file_glob_search)$/i;
+const LISTING_COMMAND = /^\s*(ls|find|fd|stat|test|\[|file|wc|du|tree|realpath|dirname|basename|echo)\b/;
+const SKILL_FILE_TOKEN = /[^\s'"`=(),;|&<>{}[\]]*SKILL\.md(?![\w.-])/g;
+export function skillLoadsIn (toolName, toolInput, cwd, { home = homedir() } = {}) {
+  const t = String(toolName || '');
+  if (DIRECT_SKILL_TOOL.test(t) || LISTING_TOOL.test(t)) return [];
+  const shell = SHELL_TOOL.test(t);
+  if (WRITE_TOOL.test(t) && !shell) return [];
+  const texts = [];
+  const walk = (v, depth) => {
+    if (texts.length >= 50 || depth > 4 || v == null) return;
+    if (typeof v === 'string') { if (v.includes('SKILL.md') && !(shell && LISTING_COMMAND.test(v))) texts.push(v.slice(0, 65536)); return; }
+    if (Array.isArray(v)) {
+      // A command given as an argv array reads as one line.
+      if (v.length && v.every((x) => typeof x === 'string')) { const line = v.join(' '); if (line.includes('SKILL.md') && !(shell && LISTING_COMMAND.test(line))) texts.push(line.slice(0, 65536)); return; }
+      for (const x of v) walk(x, depth + 1);
+      return;
+    }
+    if (typeof v === 'object') for (const x of Object.values(v)) walk(x, depth + 1);
+  };
+  walk(toolInput, 0);
+  const found = new Map();
+  try {
+    for (const text of texts) {
+      for (const m of text.matchAll(SKILL_FILE_TOKEN)) {
+        for (const loc of skillsAtToken(m[0], cwd, home)) if (!found.has(loc.name)) found.set(loc.name, loc);
+        if (found.size >= 8) break;
+      }
+    }
+  } catch { /* an unreadable path loads nothing we can name */ }
+  return [...found.values()];
+}
+
+// The skills a person names in the prompt they type, the way their harness
+// lets them: $name in Codex, /name in Cursor and Copilot. Only a name that is a
+// skill on this machine counts, so $HOME or /tmp in a sentence is nothing.
+export function typedSkillsIn (prompt, cwd, { harness, home = homedir() } = {}) {
+  const sigil = harness === 'codex' ? '\\$' : (harness === 'cursor' || harness === 'github-copilot') ? '/' : null;
+  if (!sigil) return [];
+  // Followed by a slash it is a path (/review/notes.md), not a skill.
+  const re = new RegExp(`(?:^|\\s)${sigil}([A-Za-z0-9][A-Za-z0-9_.:-]{0,99})(?=$|[^/\\w])`, 'g');
+  const out = new Map();
+  for (const m of String(prompt || '').slice(0, 32000).matchAll(re)) {
+    const name = m[1].replace(/[.:]+$/, '');
+    if (out.has(name) || !skillNameOk(name)) continue;
+    try {
+      const loc = locateSkill(name, cwd, home, harness);
+      if (loc) out.set(name, { name, ...loc });
+    } catch { /* not a skill here */ }
+    if (out.size >= 5) break;
+  }
+  return [...out.values()];
+}
+
+// The evaluate body of one skill load, the same whichever way the skill was
+// reached, so the brain records and checks it as it does a Skill tool call.
+export function skillLoadBody (cfg, load, { sessionId = null, cwd = null, via = 'read', byTool = null, actorChain = null } = {}) {
+  let desc = load.desc || null;
+  if (!desc) {
+    try { desc = load.main ? describeLocated(load.name, load, { sensitive: cfg.sensitive }) : { name: load.name, origin: 'unknown' }; }
+    catch { desc = { name: load.name }; }
+  }
+  return {
+    agent: cfg.agent, tool: 'Skill', action_type: 'tool_call',
+    action: `Skill(${JSON.stringify({ skill: load.name })})`, target: null,
+    environment: cfg.env, session_id: sessionId,
+    on_behalf_of: actsFor(cwd),
+    actor_chain: actorChain || [{ type: 'agent', id: cfg.agent, display: cfg.agent }],
+    target_attr: cfg.sensitive ? null : { skill: load.name },
+    skill: desc,
+    metadata: { cwd, source: cfg.source, via, ...(byTool ? { tool: byTool } : {}), ...(cfg.sensitive ? { sensitive: true } : {}) },
+    ...(cfg.sensitive ? { sensitive: true } : {}),
+  };
+}
+
+// Ask Clevr about each skill a call or a prompt loads, before it goes on.
+// Returns null when every load may proceed, or { message } when one may not:
+// the caller refuses in its own harness's words. A hold is remembered like any
+// other, so once a person approves it the same load goes through on the retry.
+//   honorShadow  CLEVR_MODE=shadow on this machine records and never stops (the
+//                one harness that reads it, Cursor)
+//   recordOnly   the harness cannot stop what this hook sees (Copilot's
+//                prompt): every load is recorded, none is refused, and what
+//                Clevr would have stopped comes back as { message, recordedOnly }
+export async function gateSkillLoads (cfg, loads, { honorShadow = false, recordOnly = false, ...ctx } = {}) {
+  let flagged = null;
+  for (const load of (loads || []).slice(0, 8)) {
+    const body = skillLoadBody(cfg, load, ctx);
+    const input = { skill: load.name };
+    const pending = rememberedHold(cfg.agent, 'Skill', input);
+    if (pending) body.resume = pending;
+    const res = await postEvaluate(cfg, body);
+    if (res.inactive) return null;
+    if (res.failclosed) { if (recordOnly) continue; return { message: res.reason }; }
+    if (res.failopen) { process.stderr.write(`[clevr] engine error (${res.reason}); the skill ${load.name} loads unchecked (fail-open).\n`); continue; }
+    const v = res.verdict;
+    const effect = v.effect;
+    const id = v.decision_id || null;
+    const tag = id ? ` [${id}]` : '';
+    const held = effect === 'escalate' || effect === 'step_up';
+    if (held) rememberHold(cfg.agent, 'Skill', input, id);
+    else if (pending) rememberHold(cfg.agent, 'Skill', input, null);
+    if (honorShadow && cfg.mode === 'shadow') continue;
+    if (effect !== 'block' && !(held && cfg.escalate !== 'allow')) continue;
+    const tenantMsg = (effect === 'block' ? v.block_message : v.stepup_message) || null;
+    const message = tenantMsg ? `${tenantMsg}${tag}`
+      : effect === 'block'
+        ? `Clevr blocked loading the skill ${load.name}: ${v.reason || ''}${tag}`
+        : `Clevr did not load the skill ${load.name}. It needs a person's decision first: ${v.reason || ''} Once someone has approved it in Clevr, try again and it will go through.${tag}`;
+    if (recordOnly) { flagged = flagged || { message, recordedOnly: true }; continue; }
+    if (id) { try { await confirmEnforcement(cfg, id, 'denied'); } catch { /* stays unconfirmed */ } }
+    return { message };
+  }
+  return flagged;
 }

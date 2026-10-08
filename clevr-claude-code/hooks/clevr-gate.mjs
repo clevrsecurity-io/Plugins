@@ -22,7 +22,7 @@
 // clevr-common.mjs for the full CLEVR_* list.
 
 import { readFileSync } from 'node:fs';
-import { trunc, loadConfig, readConversation, postEvaluate, confirmEnforcement, machineContext, evidenceRefs, actsFor, rememberedHold, rememberHold, effectiveFailsafe } from './clevr-common.mjs';
+import { trunc, loadConfig, readConversation, postEvaluate, confirmEnforcement, machineContext, evidenceRefs, actsFor, rememberedHold, rememberHold, effectiveFailsafe, describeSkill, skillLoadsIn, gateSkillLoads } from './clevr-common.mjs';
 
 function out (decision, reason) {
   if (decision) {
@@ -113,6 +113,21 @@ async function main () {
       : { input: tool_input, cwd, source: cfg.source, agent_id: agent_id || null, agent_type: agent_type || null },
     ...(cfg.sensitive ? { sensitive: true } : {}),
   };
+  // A skill load names the skill, and says what this machine loaded under that
+  // name (describeSkill): its fingerprint always, its text outside confidential
+  // mode. Clevr governs the load as skill:<name>.
+  if (tool_name === 'Skill' && tool_input && typeof tool_input.skill === 'string') {
+    body.skill = describeSkill(tool_input.skill, cwd, { sensitive: cfg.sensitive });
+  }
+  // A skill's instructions opened another way than the Skill tool: a Read of
+  // its SKILL.md, or a shell command, which is how Codex loads every skill. The
+  // load is asked first, as its own action, and this call runs only if the
+  // load may; the call itself is then checked as usual.
+  const loads = skillLoadsIn(tool_name, tool_input, cwd);
+  if (loads.length) {
+    const stop = await gateSkillLoads(cfg, loads, { sessionId: session_id || null, cwd, byTool: tool_name, actorChain });
+    if (stop) out('deny', stop.message);
+  }
   if (!cfg.sensitive && cfg.forwardCtx && transcript_path) {
     const convo = readConversation(transcript_path, cfg.contextTurns);
     if (convo.length) {

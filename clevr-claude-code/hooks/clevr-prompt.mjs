@@ -24,7 +24,7 @@
 // from the conversation — it gets fully scanned without spurious verb blocks.
 
 import { readFileSync } from 'node:fs';
-import { trunc, loadConfig, readConversation, postPrompt, actsFor } from './clevr-common.mjs';
+import { trunc, loadConfig, readConversation, postPrompt, actsFor, typedSkillsIn, gateSkillLoads } from './clevr-common.mjs';
 
 // UserPromptSubmit: empty output (exit 0) = the prompt proceeds.
 function allow () { process.exit(0); }
@@ -53,11 +53,25 @@ async function main () {
     process.stderr.write('[clevr] CLEVR_API_KEY not set; prompt capture inactive (allowing).\n');
     allow();
   }
+  const { prompt = '', session_id, transcript_path, cwd } = hook;
+
+  // A skill a person names in a Codex prompt ($name) can reach the model
+  // without any tool call, so it is asked here, the way the gate asks about a
+  // skill the agent opens. Only the name and the version leave this machine,
+  // never the prompt, so this runs in confidential mode too. Claude Code's
+  // typed /name is asked by clevr-expand.mjs instead.
+  if (cfg.source === 'codex') {
+    const typed = typedSkillsIn(prompt, cwd, { harness: 'codex' });
+    if (typed.length) {
+      const stop = await gateSkillLoads(cfg, typed, { sessionId: session_id || null, cwd: cwd || null, via: 'typed' });
+      if (stop) block(stop.message);
+    }
+  }
+
   // Sensitive mode sends only action SHAPES; a prompt is pure content, so it
   // stays on this machine. The gate still governs the tool calls it leads to.
   if (cfg.sensitive) allow();
 
-  const { prompt = '', session_id, transcript_path, cwd } = hook;
   if (!String(prompt).trim()) allow();   // nothing to scan
 
   // Build the recent window and make sure THIS prompt is its last user turn (the

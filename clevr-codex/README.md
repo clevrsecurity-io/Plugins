@@ -3,14 +3,14 @@
 Codex has hooks since May 2026, and the ChatGPT desktop app runs the same Codex
 locally, from the same `~/.codex/hooks.json`. One install governs both.
 
-Six hooks, the same six as Claude Code, because Codex reads the same input and
-honours the same answers:
+Six hooks, the ones Claude Code shares with Codex, because Codex reads the same
+input and honours the same answers:
 
 | Moment | Hook | What Clevr does | Can it stop it? |
 |---|---|---|---|
 | The session opens | `SessionStart` | Tells the model it is governed and that a refusal is a decision, not a failure | no, it explains |
-| The prompt you send | `UserPromptSubmit` | Scans it for personal data, secrets and injection | **Yes** |
-| A tool about to run | `PreToolUse` | Evaluates the call against the mandate and the floor | **Yes**, before it runs |
+| The prompt you send | `UserPromptSubmit` | Scans it for personal data, secrets and injection; a skill you name as `$name` is asked as that skill | **Yes** |
+| A tool about to run | `PreToolUse` | Evaluates the call against the mandate and the floor; a skill Codex opens (`cat …/SKILL.md`) is asked first as that skill | **Yes**, before it runs |
 | What the tool returned | `PostToolUse` | Scans the payload the model is about to read | **Yes**, the result is withheld |
 | A sub-agent starts | `SubagentStart` | Records the delegation edge, signed | no, it records |
 | The reply | `Stop` | Scans it on the way out | no, it records |
