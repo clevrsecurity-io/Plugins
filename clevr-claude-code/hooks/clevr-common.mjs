@@ -17,6 +17,7 @@ import { tmpdir, userInfo, hostname, homedir } from 'node:os';
 import { join, dirname, basename, relative, resolve, isAbsolute, sep } from 'node:path';
 import http from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
+import { TextDecoder } from 'node:util';
 import https from 'node:https';
 
 // Disk cache of the workspace/per-agent fail policy. These hooks are SHORT-LIVED
@@ -862,7 +863,39 @@ export function locateSkill (name, cwd, home = homedir(), harness = 'claude-code
     if (c.dir && existsSync(join(c.dir, 'SKILL.md'))) return { origin: c.origin, plugin: c.plugin || null, kind: 'folder', root: c.dir, main: join(c.dir, 'SKILL.md') };
     if (c.file && existsSync(c.file)) return { origin: c.origin, plugin: c.plugin || null, kind: 'file', root: c.file, main: c.file };
   }
+  return colon < 0 ? skillByDeclaredName(n, harness, cwd, home) : null;
+}
+
+// A skill can answer to the name its SKILL.md declares rather than its
+// folder's. Found by the folder alone, such a load went out with no content,
+// which nothing could compare (founder, 2026-10-09: a renamed skill). Same
+// roots, same order, the first lines of each SKILL.md, bounded.
+function skillByDeclaredName (n, harness, cwd, home) {
+  for (const r of skillRoots(harness, cwd, home)) {
+    let entries;
+    try { entries = readdirSync(r.dir, { withFileTypes: true }).filter((e) => e.isDirectory() && !e.name.startsWith('.')).slice(0, 300); } catch { continue; }
+    for (const e of entries) {
+      const main = join(r.dir, e.name, 'SKILL.md');
+      if (declaredSkillName(main) === n) return { origin: r.origin, plugin: null, kind: 'folder', root: join(r.dir, e.name), main };
+    }
+  }
   return null;
+}
+
+// The name a SKILL.md declares in its front matter, read from its first 4 KB.
+function declaredSkillName (file) {
+  let fd;
+  try {
+    fd = openSync(file, 'r');
+    const buf = new Uint8Array(4096);
+    const n = readSync(fd, buf, 0, 4096, 0);
+    const lines = new TextDecoder().decode(buf.subarray(0, n)).split('\n').map((l) => l.replace(/\r$/, ''));
+    if (lines[0] !== '---') return null;
+    for (let i = 1; i < lines.length && lines[i] !== '---'; i++) {
+      if (lines[i].startsWith('name:')) return lines[i].slice('name:'.length).trim().replace(/^["']|["']$/g, '') || null;
+    }
+    return null;
+  } catch { return null; } finally { if (fd !== undefined) try { closeSync(fd); } catch { /* closed */ } }
 }
 
 // Every file of a skill, in a stable order, within the budget. Symbolic links
