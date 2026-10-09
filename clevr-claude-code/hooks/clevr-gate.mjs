@@ -111,9 +111,11 @@ async function main () {
     // Sensitive mode: send ONLY the shape — omit the tool arguments and the raw
     // tool_input so a confidential payload never leaves this machine.
     target_attr: cfg.sensitive ? null : ((tool_input && typeof tool_input === 'object' && !Array.isArray(tool_input)) ? tool_input : null),
+    // The machine's system (win32, darwin, linux): the engine sorts the shell's
+    // system commands by kind per system (brain lib/system_commands.js).
     metadata: cfg.sensitive
-      ? { cwd, source: cfg.source, agent_id: agent_id || null, agent_type: agent_type || null, sensitive: true }
-      : { input: tool_input, cwd, source: cfg.source, agent_id: agent_id || null, agent_type: agent_type || null },
+      ? { cwd, os: process.platform, source: cfg.source, agent_id: agent_id || null, agent_type: agent_type || null, sensitive: true }
+      : { input: tool_input, cwd, os: process.platform, source: cfg.source, agent_id: agent_id || null, agent_type: agent_type || null },
     ...(cfg.sensitive ? { sensitive: true } : {}),
   };
   // A skill load names the skill, and says what this machine loaded under that

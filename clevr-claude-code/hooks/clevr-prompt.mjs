@@ -115,6 +115,9 @@ async function main () {
   // that never received the record loses a record, not a decision.
   if (res.ungated) {
     if (!res.sent) process.stderr.write('[clevr] engine unreachable; this workspace records prompts without gating them, so the prompt proceeds unrecorded.\n');
+    // Sent in the background, a record that did not land is only known after
+    // the hook that wrote it has exited: the next prompt says so.
+    if (res.lost) process.stderr.write(`[clevr] ${res.lost} earlier record${res.lost === 1 ? '' : 's'} did not reach the engine; this workspace records prompts without gating them, so ${res.lost === 1 ? 'that prompt' : 'those prompts'} proceeded unrecorded.\n`);
     allow();
   }
   if (res.failclosed) block(res.reason);

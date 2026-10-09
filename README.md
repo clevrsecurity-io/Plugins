@@ -12,7 +12,9 @@ hooks: every prompt, every skill or command typed as `/name`, every tool call
 before it runs, every tool result, every reply, sub-agents, and the ground
 rules at session start. Each skill the agent loads is checked as that skill,
 with the version found on the machine, and the skills your workspace
-distributes are installed at the start of each session. `/clevr-gate:status`
+distributes are installed at the start of each session. Each record names the
+machine it comes from, so Clevr says which agent runs on which machine
+(`CLEVR_SEND_MACHINE=0` turns it off). `/clevr-gate:status`
 says which engine governs the session, in which mode, and what it last decided.
 
 Install it in one command:

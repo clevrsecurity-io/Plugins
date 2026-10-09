@@ -5,9 +5,17 @@
 // anywhere below leaves nothing behind. The request then runs to its answer, or
 // to a bounded timeout: nobody is waiting on this process, so it can afford to
 // wait on the network, which the hook could not.
-import { readFileSync, unlinkSync } from 'node:fs';
+import { readFileSync, unlinkSync, appendFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import http from 'node:http';
 import https from 'node:https';
+
+// A record that did not land is written down, so the next hook can say so: the
+// hook that wrote it has exited and nobody else would ever know (lostRecords in
+// clevr-common.mjs reads and clears this file).
+export const LOST_FILE = join(tmpdir(), 'clevr-records-lost.log');
+const lost = () => { try { appendFileSync(LOST_FILE, new Date().toISOString() + '\n', { mode: 0o600 }); } catch { /* best effort */ } process.exit(0); };
 
 const file = process.argv[2];
 if (!file) process.exit(0);
@@ -24,7 +32,7 @@ const req = mod.request(url, {
   method: 'POST',
   agent: false,
   headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${job.apiKey}`, 'Content-Length': payload.length },
-}, (res) => { res.resume(); res.on('end', () => process.exit(0)); });
-req.on('error', () => process.exit(0));
-req.setTimeout(15000, () => { req.destroy(); process.exit(0); });
+}, (res) => { res.resume(); res.on('end', () => (res.statusCode >= 200 && res.statusCode < 300 ? process.exit(0) : lost())); });
+req.on('error', lost);
+req.setTimeout(15000, () => { req.destroy(); lost(); });
 req.end(payload);

@@ -96,6 +96,7 @@ it starts with no shell environment at all. An exported key still wins.
 | `CLEVR_ENV` | (none) | Environment label (`prod` / `staging` / `dev`) sent to the engine. |
 | `CLEVR_RESULT_MAX_CHARS` | `8000` | How much of a tool's result to forward for scanning. The detectors work on the text, not the volume. |
 | `CLEVR_SESSION_CONTEXT` | `1` | `0` stops the plugin telling the model at session start that it is governed. |
+| `CLEVR_SEND_MACHINE` | `1` | Each record names the machine the hook runs on, as the endpoint agent names it (`CLEVR_ENDPOINT_HOST`, else the system's name), with the public half of the endpoint agent's device key when that agent is installed. Clevr then says which agent runs on which machine. The private key is never read into what is sent. `0` sends no machine. |
 
 ## Rollout
 

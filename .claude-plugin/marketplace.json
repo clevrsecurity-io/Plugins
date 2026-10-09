@@ -9,8 +9,8 @@
     {
       "name": "clevr-gate",
       "source": "./clevr-claude-code",
-      "description": "Govern Claude Code through Clevr's runtime policy engine: every tool call, skill, prompt, tool result and reply, and the skills your workspace distributes, with a signed receipt. /clevr-gate:status says where you stand.",
-      "version": "1.4.0",
+      "description": "Govern Claude Code through Clevr's runtime policy engine: every tool call, skill, prompt, tool result and reply, the skills your workspace distributes, and the machine each agent runs on, with a signed receipt. /clevr-gate:status says where you stand.",
+      "version": "1.5.0",
       "author": {
         "name": "Clevr Security"
       },

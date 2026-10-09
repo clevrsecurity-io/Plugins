@@ -398,6 +398,37 @@ export function httpGetJson (urlStr, { headers = {}, timeoutMs = 3000 } = {}) {
   });
 }
 
+// The machine this hook runs on, named as the endpoint agent names it, so Clevr
+// can say which agent runs on which machine (founder, 2026-10-09: "comment tu
+// classe par machine ou par agent ?"). The name is CLEVR_ENDPOINT_HOST, else
+// the system's, as in the endpoint agent. A network name can change (a laptop
+// on another network), so the public half of the endpoint agent's device key
+// goes with it when that agent is installed here: it names the machine the
+// same way across networks. Only the public half: the file also holds the
+// private seed, which is never read into what is sent.
+const DEVICE_PUB = /^[A-Za-z0-9+/]{43}=$/;
+let _machine;
+export function machineOf (home = homedir()) {
+  if (_machine !== undefined) return _machine;
+  // A workspace that does not want machine names to leave the laptop.
+  if (process.env.CLEVR_SEND_MACHINE === '0') { _machine = null; return _machine; }
+  let name = '';
+  try { name = String(process.env.CLEVR_ENDPOINT_HOST || hostname() || '').trim().slice(0, 200); } catch { /* no name */ }
+  let key = null;
+  try {
+    const pub = JSON.parse(readFileSync(join(home, '.clevr', 'endpoint-key.json'), 'utf8')).pub;
+    if (typeof pub === 'string' && DEVICE_PUB.test(pub)) key = pub;
+  } catch { /* no endpoint agent here */ }
+  _machine = (name || key) ? { ...(name ? { name } : {}), ...(key ? { device_key: key } : {}) } : null;
+  return _machine;
+}
+// Every record carries it, whichever hook and harness sent it.
+export function withMachine (body) {
+  const m = machineOf();
+  if (!m || !body || typeof body !== 'object') return body;
+  return { ...body, metadata: { ...(body.metadata && typeof body.metadata === 'object' ? body.metadata : {}), machine: m } };
+}
+
 // POST an action to the engine and return how it resolved. Never throws; the
 // caller applies the failsafe. Shapes:
 //   { inactive: true }            no API key — the hook is off
@@ -409,7 +440,7 @@ export async function postEvaluate (cfg, body) {
   try {
     const r = await httpPostJson(`${cfg.base}/v1/evaluate`, {
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
-      body: JSON.stringify(body),
+      body: JSON.stringify(withMachine(body)),
       timeoutMs: cfg.timeoutMs,
     });
     if (r.status < 200 || r.status >= 300) throw new Error(`HTTP ${r.status}`);
@@ -451,7 +482,7 @@ export function postUnwatched (cfg, body) {
     let url;
     try { url = new URL(`${cfg.base}/v1/evaluate`); } catch { finish(); return; }
     const mod = url.protocol === 'https:' ? https : http;
-    const payload = Buffer.from(JSON.stringify(body));
+    const payload = Buffer.from(JSON.stringify(withMachine(body)));
     const req = mod.request(url, {
       method: 'POST',
       agent: false,
@@ -471,11 +502,23 @@ export function postUnwatched (cfg, body) {
 // process sends the record and waits for the answer; the hook does not wait
 // for the child. The body rides in a file only this user can read, which the
 // child deletes on reading.
+// How many records a background sender could not deliver since the last hook
+// asked, and clear the count. The sender writes one line per lost record.
+export function lostRecords () {
+  const f = join(tmpdir(), 'clevr-records-lost.log');
+  try {
+    if (!existsSync(f)) return 0;
+    const n = readFileSync(f, 'utf8').split('\n').filter(Boolean).length;
+    rmSync(f, { force: true });
+    return n;
+  } catch { return 0; }
+}
+
 export function postDetached (cfg, body) {
   if (!cfg.apiKey) return false;
   try {
     const file = join(tmpdir(), `clevr-send-${process.pid}-${randomBytes(6).toString('hex')}.json`);
-    writeFileSync(file, JSON.stringify({ url: `${cfg.base}/v1/evaluate`, apiKey: cfg.apiKey, body }), { mode: 0o600 });
+    writeFileSync(file, JSON.stringify({ url: `${cfg.base}/v1/evaluate`, apiKey: cfg.apiKey, body: withMachine(body) }), { mode: 0o600 });
     const sender = join(dirname(fileURLToPath(import.meta.url)), 'clevr-send.mjs');
     // An install that did not ship the sender (an older installer copied the
     // shared helpers alone) sends the record the older way instead of spawning
@@ -496,7 +539,10 @@ export function postDetached (cfg, body) {
 // one hook instead of here. Both cases now answer the same way: `ungated` means
 // the prompt proceeds, and `sent` says whether the record left this machine.
 export async function postPrompt (cfg, body) {
-  if (promptsUngatedRecently(cfg.agent)) return { ungated: true, sent: postDetached(cfg, body) || await postUnwatched(cfg, body) };
+  if (promptsUngatedRecently(cfg.agent)) {
+    const lost = lostRecords();
+    return { ungated: true, sent: postDetached(cfg, body) || await postUnwatched(cfg, body), ...(lost ? { lost } : {}) };
+  }
   const res = await postEvaluate({ ...cfg, timeoutMs: cfg.promptTimeoutMs }, body);
   if (res.failclosed && readGatePromptsCache(cfg.agent) === false) return { ungated: true, sent: false };
   return res;
