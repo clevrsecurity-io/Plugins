@@ -21,9 +21,14 @@
 // prompt. CLEVR_SKILLS_SYNC=0 turns that off.
 //
 // CLEVR_SESSION_CONTEXT=0 turns the explanation off.
+//
+// When the workspace asks for proven sessions (or CLEVR_SESSION_PROOF=1), it
+// also opens this session with its own key (clevr-common.mjs openSession), so
+// every call of it is signed from the first. If a session of this agent was
+// stopped with its new sessions held, the person is told here, at the start.
 
 import { readFileSync } from 'node:fs';
-import { loadConfig, syncDistributedSkills } from './clevr-common.mjs';
+import { loadConfig, syncDistributedSkills, wantsSessionProof, loadSession, openSession } from './clevr-common.mjs';
 
 function quiet () { process.exit(0); }
 
@@ -60,13 +65,23 @@ async function main () {
     process.stderr.write(`[clevr] not installed, a skill of yours already has the name: ${sync.conflicts.join(', ')}. Rename yours to receive the one your workspace distributes.\n`);
   }
 
+  // Bounded like the skills sync: a session never waits long on this.
+  let held = null;
+  if (hook.session_id && wantsSessionProof(cfg) && !loadSession(cfg, hook.session_id)) {
+    const s = await openSession({ ...cfg, timeoutMs: 2500 }, hook.session_id).catch(() => null);
+    if (s && s.held) held = s.message;
+  }
+  if (held) process.stderr.write(`[clevr] ${held}\n`);
+
   const out = { hookEventName: 'SessionStart' };
   if (process.env.CLEVR_SESSION_CONTEXT !== '0') out.additionalContext = context(cfg.agent);
+  if (held) out.additionalContext = `${out.additionalContext ? out.additionalContext + '\n\n' : ''}Clevr: ${held} Tell the person; actions in this session may be refused until then.`;
   // Claude Code reads its skills before this hook ends; this asks it to read
   // them again. Codex reads them on its own.
   if (sync.changed && !codex) out.reloadSkills = true;
   if (Object.keys(out).length === 1) quiet();
-  process.stdout.write(JSON.stringify({ hookSpecificOutput: out }));
+  // The person sees it too, not only the model.
+  process.stdout.write(JSON.stringify({ hookSpecificOutput: out, ...(held ? { systemMessage: `Clevr: ${held}` } : {}) }));
   process.exit(0);
 }
 

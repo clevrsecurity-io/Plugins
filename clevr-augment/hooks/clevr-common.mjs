@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir, userInfo, hostname, homedir } from 'node:os';
 import { join, dirname, basename, relative, resolve, isAbsolute, sep } from 'node:path';
 import http from 'node:http';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, generateKeyPairSync, createPrivateKey, sign as edSign } from 'node:crypto';
 import { TextDecoder } from 'node:util';
 import https from 'node:https';
 
@@ -368,12 +368,129 @@ function httpPostJson (urlStr, { headers = {}, body = '', timeoutMs = 15000 } = 
       let data = '';
       res.setEncoding('utf8');
       res.on('data', (c) => { data += c; });
-      res.on('end', () => resolve({ status: res.statusCode || 0, body: data }));
+      res.on('end', () => resolve({ status: res.statusCode || 0, body: data, headers: res.headers || {} }));
     });
     req.on('error', reject);
     req.setTimeout(timeoutMs, () => req.destroy(new Error(`timeout after ${timeoutMs}ms`)));
     req.end(payload);
   });
+}
+
+// ── A session opened with its own key ───────────────────────────────────────
+// The engine can bind a session to a key this machine holds (brain
+// lib/session_identity.js, docs/api/sessions.mdx): the session is opened once
+// with POST /v1/sessions, and every call of it then carries the token and the
+// key's signature. Stopping the session in Clevr revokes the token, so it cannot
+// be continued under another session id.
+//
+// Signed when the workspace asks (its session_proof, observe or require, read
+// back from the last verdict) or when this machine does (CLEVR_SESSION_PROOF=1;
+// =0 never). A workspace with it off sees no change at all: a proof that failed
+// would be refused, so nothing is signed that nobody asked for.
+//
+// The key is written once to a file only this user can read and never sent.
+// The model runs commands as the same user, so it could read the file too:
+// keeping the key out of its reach is the endpoint agent's job (phase 4).
+const b64url = (buf) => Buffer.from(buf).toString('base64').replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
+// MUST match brain lib/session_identity.js callDigest and sessionSigningString
+// byte for byte (brain/test_session_identity.mjs checks it).
+export function sessionCallDigest ({ tool = '', action = '', target = '', args = null } = {}) {
+  const canon = JSON.stringify([String(tool || ''), String(action || ''), String(target || ''), args == null ? null : args]);
+  return b64url(createHash('sha256').update(canon).digest());
+}
+export function sessionSigningString ({ sid, agent, digest, ts, nonce }) {
+  return ['clevr-session-v1', sid || '', agent || '', digest || '', String(ts || ''), nonce || ''].join('\n');
+}
+const safeName = (s) => String(s || 'default').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 60) || 'default';
+function sessionsDir (home = homedir()) { return join(home, '.clevr', 'sessions'); }
+function sessionFile (agent, sid, home = homedir()) {
+  return join(sessionsDir(home), `${safeName(agent)}--${createHash('sha256').update(String(sid)).digest('hex').slice(0, 32)}.json`);
+}
+function sessionPolicyFile (agent) {
+  return join(tmpdir(), `clevr-session-proof-${safeName(agent)}.json`);
+}
+// Remember what the workspace asks, from a verdict.
+export function writeSessionPolicy (agent, policy) {
+  if (!['off', 'observe', 'require'].includes(policy)) return;
+  try { writeFileSync(sessionPolicyFile(agent), JSON.stringify({ policy, at: Date.now() }), 'utf8'); } catch { /* non-fatal */ }
+}
+export function wantsSessionProof (cfg) {
+  if (process.env.CLEVR_SESSION_PROOF === '1') return true;
+  if (process.env.CLEVR_SESSION_PROOF === '0') return false;
+  try { return ['observe', 'require'].includes(JSON.parse(readFileSync(sessionPolicyFile(cfg && cfg.agent), 'utf8')).policy); } catch { return false; }
+}
+// This session's key and token, if it was opened here and is not about to expire.
+export function loadSession (cfg, sid, home = homedir()) {
+  if (!sid) return null;
+  try {
+    const s = JSON.parse(readFileSync(sessionFile(cfg.agent, sid, home), 'utf8'));
+    return s && s.token && s.key && s.exp > Date.now() + 60_000 ? s : null;
+  } catch { return null; }
+}
+// Open the session: a fresh key pair, the public half to Clevr, the token and
+// the private half kept here. Returns the session, { held, message } when the
+// agent's new sessions are held after a stop, or null when it could not open
+// (an older engine, no network): calls then go unsigned, as before.
+export async function openSession (cfg, sid, { goal = null, home = homedir() } = {}) {
+  if (!cfg.apiKey || !sid) return null;
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  const pub = publicKey.export({ format: 'der', type: 'spki' }).subarray(-32).toString('base64');
+  const r = await httpPostJson(`${cfg.base}/v1/sessions`, {
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
+    body: JSON.stringify({ agent: cfg.agent, public_key: pub, session_id: String(sid), runtime: cfg.source, ...(goal ? { goal: trunc(goal, 500) } : {}) }),
+    timeoutMs: Math.min(cfg.timeoutMs || 15000, 5000),
+  });
+  const j = (() => { try { return JSON.parse(r.body); } catch { return null; } })();
+  if (r.status === 403 && j && j.error === 'sessions_held') return { held: true, message: j.message || 'This agent\'s new sessions are held.' };
+  if (r.status !== 200 || !j || !j.session_token) return null;
+  // The engine's clock, from its answer, so a laptop a few minutes off still
+  // signs proofs the engine accepts (they are good for 5 minutes).
+  const server = Date.parse(r.headers && r.headers.date);
+  const s = { sid: j.session_id, agent: cfg.agent, token: j.session_token, exp: Date.parse(j.expires_at),
+    offset: Number.isFinite(server) ? server - Date.now() : 0,
+    key: privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64') };
+  try {
+    mkdirSync(sessionsDir(home), { recursive: true, mode: 0o700 });
+    writeFileSync(sessionFile(cfg.agent, sid, home), JSON.stringify(s), { mode: 0o600 });
+    pruneSessions(home);
+  } catch { /* unsigned from the next call on, as before */ }
+  return s;
+}
+// Sessions older than two days are over: their tokens expired.
+function pruneSessions (home) {
+  try {
+    const dir = sessionsDir(home);
+    for (const f of readdirSync(dir)) {
+      const p = join(dir, f);
+      try { if (Date.now() - lstatSync(p).mtimeMs > 2 * 86_400_000) rmSync(p, { force: true }); } catch { /* next */ }
+    }
+  } catch { /* nothing to prune */ }
+}
+// The body with its session proof, signed over the call exactly as it is sent.
+export function signedBody (session, body) {
+  const ts = Math.floor((Date.now() + (Number(session.offset) || 0)) / 1000);
+  const nonce = randomBytes(12).toString('hex');
+  const digest = sessionCallDigest({ tool: body.tool, action: body.action, target: body.target, args: body.target_attr ?? null });
+  const key = createPrivateKey({ key: Buffer.from(session.key, 'base64'), format: 'der', type: 'pkcs8' });
+  const sig = 'ed25519:' + edSign(null, Buffer.from(sessionSigningString({ sid: session.sid, agent: session.agent, digest, ts, nonce })), key).toString('base64');
+  return { ...body, session_proof: { token: session.token, ts, nonce, sig } };
+}
+// Sign when asked to, opening the session first when this machine has not yet.
+export async function withSessionProof (cfg, body, { open = true } = {}) {
+  if (!body || !body.session_id || !wantsSessionProof(cfg)) return body;
+  let s = loadSession(cfg, body.session_id);
+  if (!s && open) {
+    const o = await openSession(cfg, body.session_id, { goal: body.session_goal || null }).catch(() => null);
+    if (o && !o.held) s = o;
+  }
+  return s ? signedBody(s, body) : body;
+}
+// The same, for the paths that cannot wait for an opening (a record sent and
+// not waited on): signed when the session is already open here.
+function withSessionProofNow (cfg, body) {
+  if (!body || !body.session_id || !wantsSessionProof(cfg)) return body;
+  const s = loadSession(cfg, body.session_id);
+  return s ? signedBody(s, body) : body;
 }
 
 // One-shot GET, same socket discipline as the POST above, for the status
@@ -441,7 +558,7 @@ export async function postEvaluate (cfg, body) {
   try {
     const r = await httpPostJson(`${cfg.base}/v1/evaluate`, {
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
-      body: JSON.stringify(withMachine(body)),
+      body: JSON.stringify(withMachine(await withSessionProof(cfg, body))),
       timeoutMs: cfg.timeoutMs,
     });
     if (r.status < 200 || r.status >= 300) throw new Error(`HTTP ${r.status}`);
@@ -456,6 +573,7 @@ export async function postEvaluate (cfg, body) {
       throw new Error('engine returned no verdict effect');
     }
     writeFailsafeCache(cfg.agent, verdict.failsafe, verdict.gate_prompts);   // remember the policy for offline calls
+    writeSessionPolicy(cfg.agent, verdict.session_proof);                     // and whether calls are to be signed
     return { verdict };
   } catch (e) {
     // Brain unreachable → last-known workspace/agent policy (disk cache), else the
@@ -483,7 +601,7 @@ export function postUnwatched (cfg, body) {
     let url;
     try { url = new URL(`${cfg.base}/v1/evaluate`); } catch { finish(); return; }
     const mod = url.protocol === 'https:' ? https : http;
-    const payload = Buffer.from(JSON.stringify(withMachine(body)));
+    const payload = Buffer.from(JSON.stringify(withMachine(withSessionProofNow(cfg, body))));
     const req = mod.request(url, {
       method: 'POST',
       agent: false,
@@ -519,7 +637,7 @@ export function postDetached (cfg, body) {
   if (!cfg.apiKey) return false;
   try {
     const file = join(tmpdir(), `clevr-send-${process.pid}-${randomBytes(6).toString('hex')}.json`);
-    writeFileSync(file, JSON.stringify({ url: `${cfg.base}/v1/evaluate`, apiKey: cfg.apiKey, body: withMachine(body) }), { mode: 0o600 });
+    writeFileSync(file, JSON.stringify({ url: `${cfg.base}/v1/evaluate`, apiKey: cfg.apiKey, body: withMachine(withSessionProofNow(cfg, body)) }), { mode: 0o600 });
     const sender = join(dirname(fileURLToPath(import.meta.url)), 'clevr-send.mjs');
     // An install that did not ship the sender (an older installer copied the
     // shared helpers alone) sends the record the older way instead of spawning
