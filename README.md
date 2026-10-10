@@ -69,6 +69,23 @@ cd Plugins/clevr-codex && ./install.sh
 Then export `CLEVR_URL` and `CLEVR_API_KEY` where Codex runs. Full setup in
 [clevr-codex/README.md](clevr-codex/README.md).
 
+## clevr-gemini-cli
+
+Govern the Gemini CLI with four hooks: the prompt you send, every tool call
+before it runs, every tool result before the model reads it, and the model's
+reply. `AfterModel` hands a hook the request and the response together, so the
+reply-side checks, the system prompt given away included, run here with nothing
+in front of Gemini. Gemini has no inline ask: a hold is returned as a refusal
+that says it is held, and the same call goes through once it is approved.
+
+```
+git clone https://github.com/clevrsecurity-io/Plugins
+cd Plugins/clevr-gemini-cli && ./install.sh
+```
+
+Then export `CLEVR_URL` and `CLEVR_API_KEY` where Gemini runs. Full setup in
+[clevr-gemini-cli/README.md](clevr-gemini-cli/README.md).
+
 ## clevr-mcp-guard
 
 For any MCP host with no per-tool hook (Claude Desktop connectors, GitHub
