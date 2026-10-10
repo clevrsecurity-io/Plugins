@@ -86,6 +86,38 @@ cd Plugins/clevr-gemini-cli && ./install.sh
 Then export `CLEVR_URL` and `CLEVR_API_KEY` where Gemini runs. Full setup in
 [clevr-gemini-cli/README.md](clevr-gemini-cli/README.md).
 
+## clevr-augment
+
+Govern the Augment CLI with three hooks: every tool call before it runs, every
+tool result, and the conversation at the end of each turn. Augment implements
+deny only, with no inline ask, so a hold comes back as a refusal that says it is
+held. It has no prompt event either, so a prompt is read one turn late and
+recorded, never stopped; the tool call it leads to is still gated.
+
+```
+git clone https://github.com/clevrsecurity-io/Plugins
+cd Plugins/clevr-augment && ./install.sh
+```
+
+Then export `CLEVR_URL` and `CLEVR_API_KEY` where Augment runs. Full setup in
+[clevr-augment/README.md](clevr-augment/README.md).
+
+## clevr-github-copilot
+
+Govern the GitHub Copilot CLI with three hooks: the prompt, every tool call
+before it runs, and every tool result, which Copilot lets a hook replace before
+the model reads it. A prompt is recorded, not stopped: Copilot honours a decision
+there only for hooks written against its SDK. Agent mode in the IDE has no
+per-tool hook; wrap its MCP servers with [clevr-mcp-guard](clevr-mcp-guard/README.md).
+
+```
+git clone https://github.com/clevrsecurity-io/Plugins
+cd Plugins/clevr-github-copilot && ./install.sh
+```
+
+Then export `CLEVR_URL` and `CLEVR_API_KEY` where Copilot runs. Full setup in
+[clevr-github-copilot/README.md](clevr-github-copilot/README.md).
+
 ## clevr-mcp-guard
 
 For any MCP host with no per-tool hook (Claude Desktop connectors, GitHub

@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      {
+        "type": "command",
+        "bash": "node \"$HOME/.clevr/tools/clevr-copilot-gate.mjs\"",
+        "powershell": "node \"$env:USERPROFILE\\.clevr\\tools\\clevr-copilot-gate.mjs\"",
+        "cwd": ".",
+        "timeoutSec": 10
+      }
+    ]
+  }
+}
