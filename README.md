@@ -5,6 +5,42 @@ already uses. Each plugin gates the agent's tool calls in its own runtime loop,
 before they run (allow, hold, or block), with a signed audit receipt. No model
 reroute, no code change to the agent.
 
+You need a Clevr engine: its address, and an agent key from the console's Agent
+keys page. Without them a plugin stays inactive and lets everything through, so
+installing one cannot break a session.
+
+## At a glance
+
+What each plugin can stop before it happens, and what it only reads and records.
+The limits are the tool's own: a plugin can only answer where its harness lets a
+hook answer.
+
+| Plugin | Tool | The prompt | A tool call | What the tool returned | The reply |
+|---|---|---|---|---|---|
+| [clevr-claude-code](clevr-claude-code/README.md) | Claude Code, Claude Desktop | Stops | Stops | Tells the model, records | Records |
+| [clevr-cursor](clevr-cursor/README.md) | Cursor Agent | Stops | Stops | Warns the model | Records |
+| [clevr-codex](clevr-codex/README.md) | Codex, ChatGPT desktop app | Stops | Stops (local tools) | Withholds it | Records |
+| [clevr-gemini-cli](clevr-gemini-cli/README.md) | Gemini CLI | Stops | Stops | Hides it | Blocks |
+| [clevr-augment](clevr-augment/README.md) | Augment CLI | Records, one turn late | Stops | Blocks it | Records |
+| [clevr-github-copilot](clevr-github-copilot/README.md) | GitHub Copilot CLI | Records | Stops | Replaces it | Not seen |
+| [clevr-mcp-guard](clevr-mcp-guard/README.md) | Any MCP host with no hook | Not seen | Stops MCP calls | Not seen | Not seen |
+
+## One command for every tool on a machine
+
+The `clevr` command line finds the AI tools running on a machine, wires each one
+with its plugin, and then says, per tool, which gate is live and what it can stop.
+
+```
+npm install -g github:clevrsecurity-io/Plugins#cli
+clevr login --url https://your-clevr-host --key clevr_sk_...
+clevr onboard
+clevr doctor
+```
+
+It needs Node 20 and git, and lives on the [`cli` branch](https://github.com/clevrsecurity-io/Plugins/tree/cli).
+`clevr setup <tool>` wires a single one. To install a plugin by hand instead,
+each section below gives its command.
+
 ## clevr-claude-code
 
 Govern Claude Code and Claude Desktop through Clevr's policy engine. Seven
