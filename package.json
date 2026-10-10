@@ -6,6 +6,6 @@
   "bin": { "clevr": "bin/clevr.mjs" },
   "engines": { "node": ">=20" },
   "files": ["bin", "lib", "files", "README.md"],
-  "license": "UNLICENSED",
+  "license": "MIT",
   "private": true
 }
