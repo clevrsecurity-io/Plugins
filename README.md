@@ -164,4 +164,4 @@ refused call never reaches the tool. Stdio and Streamable HTTP. See
 
 ## License
 
-MIT.
+[MIT](LICENSE), for every plugin here and for the command line on the `cli` branch.
