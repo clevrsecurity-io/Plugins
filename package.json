@@ -1,0 +1,11 @@
+{
+  "name": "clevr-cli",
+  "version": "0.1.0",
+  "description": "Wire an AI coding tool to a Clevr engine in one command.",
+  "type": "module",
+  "bin": { "clevr": "bin/clevr.mjs" },
+  "engines": { "node": ">=20" },
+  "files": ["bin", "lib", "files", "README.md"],
+  "license": "UNLICENSED",
+  "private": true
+}
