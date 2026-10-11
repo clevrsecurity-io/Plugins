@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir, userInfo, hostname, homedir } from 'node:os';
 import { join, dirname, basename, relative, resolve, isAbsolute, sep } from 'node:path';
 import http from 'node:http';
+import net from 'node:net';
 import { createHash, randomBytes, generateKeyPairSync, createPrivateKey, sign as edSign } from 'node:crypto';
 import { TextDecoder } from 'node:util';
 import https from 'node:https';
@@ -388,9 +389,14 @@ function httpPostJson (urlStr, { headers = {}, body = '', timeoutMs = 15000 } = 
 // =0 never). A workspace with it off sees no change at all: a proof that failed
 // would be refused, so nothing is signed that nobody asked for.
 //
-// The key is written once to a file only this user can read and never sent.
-// The model runs commands as the same user, so it could read the file too:
-// keeping the key out of its reach is the endpoint agent's job (phase 4).
+// Where the key lives. With the endpoint agent's custody running on this
+// machine (clevr-endpoint --custody), the key is made and kept in its memory
+// and never touches the disk: this hook asks it to sign, and it signs only for
+// processes under the harness that opened the session (endpoint-agent/go/
+// custody.go). Without it, the key is written once to a file only this user
+// can read; the model runs commands as the same user and could read that file.
+// CLEVR_SESSION_CUSTODY=require signs only through custody (no file key ever),
+// =off never asks it; the default uses it when it answers.
 const b64url = (buf) => Buffer.from(buf).toString('base64').replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
 // MUST match brain lib/session_identity.js callDigest and sessionSigningString
 // byte for byte (brain/test_session_identity.mjs checks it).
@@ -419,13 +425,41 @@ export function wantsSessionProof (cfg) {
   if (process.env.CLEVR_SESSION_PROOF === '0') return false;
   try { return ['observe', 'require'].includes(JSON.parse(readFileSync(sessionPolicyFile(cfg && cfg.agent), 'utf8')).policy); } catch { return false; }
 }
-// This session's key and token, if it was opened here and is not about to expire.
+// This session's key and token, if it was opened here and is not about to
+// expire. A session held in custody has a token here and no key.
 export function loadSession (cfg, sid, home = homedir()) {
   if (!sid) return null;
   try {
     const s = JSON.parse(readFileSync(sessionFile(cfg.agent, sid, home), 'utf8'));
-    return s && s.token && s.key && s.exp > Date.now() + 60_000 ? s : null;
+    return s && s.token && (s.key || s.custody === 'endpoint') && s.exp > Date.now() + 60_000 ? s : null;
   } catch { return null; }
+}
+
+// ── The endpoint agent's custody, over its local socket ─────────────────────
+export function custodySocketPath (home = homedir()) {
+  return process.env.CLEVR_CUSTODY_SOCK || join(home, '.clevr', 'custody.sock');
+}
+const custodyMode = () => {
+  const m = String(process.env.CLEVR_SESSION_CUSTODY || '').toLowerCase();
+  return m === 'require' || m === 'off' ? m : 'auto';
+};
+// One request, one line back. Null when nothing answers (not running, too slow).
+export function custodyCall (req, { timeoutMs = 800, home = homedir() } = {}) {
+  if (process.platform === 'win32' || custodyMode() === 'off') return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let buf = '', done = false;
+    const end = (v) => { if (!done) { done = true; try { sock.destroy(); } catch { /* closed */ } resolve(v); } };
+    const sock = net.createConnection(custodySocketPath(home));
+    sock.setTimeout(timeoutMs, () => end(null));
+    sock.on('error', () => end(null));
+    sock.on('connect', () => sock.write(JSON.stringify(req) + '\n'));
+    sock.on('data', (d) => {
+      buf += d;
+      const i = buf.indexOf('\n');
+      if (i >= 0) { try { end(JSON.parse(buf.slice(0, i))); } catch { end(null); } }
+    });
+    sock.on('end', () => end(null));
+  });
 }
 // Open the session: a fresh key pair, the public half to Clevr, the token and
 // the private half kept here. Returns the session, { held, message } when the
@@ -433,11 +467,22 @@ export function loadSession (cfg, sid, home = homedir()) {
 // (an older engine, no network): calls then go unsigned, as before.
 export async function openSession (cfg, sid, { goal = null, home = homedir() } = {}) {
   if (!cfg.apiKey || !sid) return null;
-  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
-  const pub = publicKey.export({ format: 'der', type: 'spki' }).subarray(-32).toString('base64');
+  // The key in the endpoint agent's custody when it answers; in a file here
+  // otherwise, unless this machine requires custody.
+  const held = await custodyCall({ op: 'open', session_id: String(sid), agent: cfg.agent, runtime: cfg.source }, { home });
+  const custody = !!(held && held.public_key);
+  // Custody that answers and refuses (this session is another harness's) is
+  // not worked around with a file key.
+  if (!custody && (custodyMode() === 'require' || (held && held.error))) return null;
+  let privateKey = null, pub = held && held.public_key;
+  if (!custody) {
+    const kp = generateKeyPairSync('ed25519');
+    privateKey = kp.privateKey;
+    pub = kp.publicKey.export({ format: 'der', type: 'spki' }).subarray(-32).toString('base64');
+  }
   const r = await httpPostJson(`${cfg.base}/v1/sessions`, {
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
-    body: JSON.stringify({ agent: cfg.agent, public_key: pub, session_id: String(sid), runtime: cfg.source, ...(goal ? { goal: trunc(goal, 500) } : {}) }),
+    body: JSON.stringify({ agent: cfg.agent, public_key: pub, session_id: String(sid), runtime: cfg.source, key_custody: custody ? 'endpoint' : 'file', ...(goal ? { goal: trunc(goal, 500) } : {}) }),
     timeoutMs: Math.min(cfg.timeoutMs || 15000, 5000),
   });
   const j = (() => { try { return JSON.parse(r.body); } catch { return null; } })();
@@ -448,7 +493,7 @@ export async function openSession (cfg, sid, { goal = null, home = homedir() } =
   const server = Date.parse(r.headers && r.headers.date);
   const s = { sid: j.session_id, agent: cfg.agent, token: j.session_token, exp: Date.parse(j.expires_at),
     offset: Number.isFinite(server) ? server - Date.now() : 0,
-    key: privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64') };
+    ...(custody ? { custody: 'endpoint' } : { key: privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64') }) };
   try {
     mkdirSync(sessionsDir(home), { recursive: true, mode: 0o700 });
     writeFileSync(sessionFile(cfg.agent, sid, home), JSON.stringify(s), { mode: 0o600 });
@@ -466,31 +511,53 @@ function pruneSessions (home) {
     }
   } catch { /* nothing to prune */ }
 }
-// The body with its session proof, signed over the call exactly as it is sent.
+// What is signed for one call, and when.
+function proofParts (session, body) {
+  return {
+    ts: Math.floor((Date.now() + (Number(session.offset) || 0)) / 1000),
+    nonce: randomBytes(12).toString('hex'),
+    digest: sessionCallDigest({ tool: body.tool, action: body.action, target: body.target, args: body.target_attr ?? null }),
+  };
+}
+// The body with its session proof, signed over the call exactly as it is sent,
+// with a key held here.
 export function signedBody (session, body) {
-  const ts = Math.floor((Date.now() + (Number(session.offset) || 0)) / 1000);
-  const nonce = randomBytes(12).toString('hex');
-  const digest = sessionCallDigest({ tool: body.tool, action: body.action, target: body.target, args: body.target_attr ?? null });
+  const { ts, nonce, digest } = proofParts(session, body);
   const key = createPrivateKey({ key: Buffer.from(session.key, 'base64'), format: 'der', type: 'pkcs8' });
   const sig = 'ed25519:' + edSign(null, Buffer.from(sessionSigningString({ sid: session.sid, agent: session.agent, digest, ts, nonce })), key).toString('base64');
   return { ...body, session_proof: { token: session.token, ts, nonce, sig } };
 }
+// The same, signed by the endpoint agent's custody. Null when it would not
+// (it restarted and holds no key for the session any more, or it is down).
+export async function custodySignedBody (session, body, opts = {}) {
+  const { ts, nonce, digest } = proofParts(session, body);
+  const r = await custodyCall({ op: 'sign', session_id: session.sid, agent: session.agent, digest, ts, nonce }, opts);
+  return r && r.sig ? { ...body, session_proof: { token: session.token, ts, nonce, sig: r.sig } } : null;
+}
 // Sign when asked to, opening the session first when this machine has not yet.
 export async function withSessionProof (cfg, body, { open = true } = {}) {
   if (!body || !body.session_id || !wantsSessionProof(cfg)) return body;
+  if (body.session_proof) return body;
   let s = loadSession(cfg, body.session_id);
   if (!s && open) {
     const o = await openSession(cfg, body.session_id, { goal: body.session_goal || null }).catch(() => null);
     if (o && !o.held) s = o;
   }
-  return s ? signedBody(s, body) : body;
+  if (!s) return body;
+  if (!s.custody) return signedBody(s, body);
+  const signed = await custodySignedBody(s, body);
+  if (signed || !open) return signed || body;
+  // Custody lost the key (restarted): the session is opened again, once.
+  const o = await openSession(cfg, body.session_id, { goal: body.session_goal || null }).catch(() => null);
+  return (o && !o.held && o.custody && await custodySignedBody(o, body)) || body;
 }
-// The same, for the paths that cannot wait for an opening (a record sent and
-// not waited on): signed when the session is already open here.
+// The same, for the paths that cannot wait (a record sent and not waited on):
+// signed when the session's key is held here; a session in custody is signed
+// before, by the caller (postPrompt).
 function withSessionProofNow (cfg, body) {
-  if (!body || !body.session_id || !wantsSessionProof(cfg)) return body;
+  if (!body || !body.session_id || body.session_proof || !wantsSessionProof(cfg)) return body;
   const s = loadSession(cfg, body.session_id);
-  return s ? signedBody(s, body) : body;
+  return s && !s.custody ? signedBody(s, body) : body;
 }
 
 // One-shot GET, same socket discipline as the POST above, for the status
@@ -660,7 +727,10 @@ export function postDetached (cfg, body) {
 export async function postPrompt (cfg, body) {
   if (promptsUngatedRecently(cfg.agent)) {
     const lost = lostRecords();
-    return { ungated: true, sent: postDetached(cfg, body) || await postUnwatched(cfg, body), ...(lost ? { lost } : {}) };
+    // Signed here, while this hook still runs under the harness: the detached
+    // sender does not, and custody would refuse it.
+    const signed = await withSessionProof(cfg, body, { open: false }).catch(() => body);
+    return { ungated: true, sent: postDetached(cfg, signed) || await postUnwatched(cfg, signed), ...(lost ? { lost } : {}) };
   }
   const res = await postEvaluate({ ...cfg, timeoutMs: cfg.promptTimeoutMs }, body);
   if (res.failclosed && readGatePromptsCache(cfg.agent) === false) return { ungated: true, sent: false };
