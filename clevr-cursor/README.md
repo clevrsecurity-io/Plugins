@@ -33,7 +33,16 @@ so this records and never stops.
 ## Install
 
 ```
-npx clevr-cli setup cursor
+git clone https://github.com/clevrsecurity-io/Plugins
+cd Plugins/clevr-cursor && ./install.sh
+```
+
+Or with the Clevr command line, which also writes the environment for you:
+
+```
+npm install -g github:clevrsecurity-io/Plugins#cli
+clevr login --url https://your-clevr-host --key clevr_sk_...
+clevr setup cursor
 ```
 
 Writes the hooks to `~/.cursor/clevr-hooks` and registers them in

@@ -67,7 +67,7 @@ else
   echo "  hooks.postToolUse:          { \"command\": \"node \\\"$DEST/clevr-result.mjs\\\"\" }"
   echo "  hooks.afterAgentResponse:   { \"command\": \"node \\\"$DEST/clevr-answer.mjs\\\"\" }"
   echo
-  echo "Or let the CLI merge them for you:  npx clevr-cli setup cursor"
+  echo "Or let the CLI merge them for you:  npm install -g github:clevrsecurity-io/Plugins#cli && clevr setup cursor"
 fi
 
 cat <<'ENV'

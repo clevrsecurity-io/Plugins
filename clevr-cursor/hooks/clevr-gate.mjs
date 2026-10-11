@@ -22,7 +22,7 @@
 // a JSON decision on stdout. Exit 0 with no JSON is an additive no-op.
 
 import { readFileSync } from 'node:fs';
-import { trunc, loadConfig, postEvaluate, confirmEnforcement, actsFor, rememberedHold, rememberHold, machineContext, evidenceRefs, effectiveFailsafe, skillLoadsIn, gateSkillLoads } from './clevr-common.mjs';
+import { trunc, loadConfig, postEvaluate, confirmEnforcement, actsFor, rememberedHold, rememberHold, machineContext, evidenceRefs, effectiveFailsafe, skillLoadsIn, gateSkillLoads, scriptRunsIn } from './clevr-common.mjs';
 
 // permission ∈ 'allow' | 'deny' | 'ask'. null => print nothing (additive no-op),
 // so Cursor's normal flow proceeds unchanged (used for allow + shadow).
@@ -119,6 +119,10 @@ async function main () {
   // agent, the tool, the arguments and its own window, so a remembered id
   // that no longer fits simply buys nothing.
   const pending = rememberedHold(cfg.agent, toolName, toolInput);
+  // The scripts the command runs, read here: the brain judges what they hold
+  // (sensitive mode sends their hash only).
+  const scriptRuns = scriptRunsIn(toolName, toolInput, cwd, { sensitive: !!cfg.sensitive });
+  if (scriptRuns.length) body.script_runs = scriptRuns;
   if (pending) body.resume = pending;
 
   const res = await postEvaluate(cfg, body);

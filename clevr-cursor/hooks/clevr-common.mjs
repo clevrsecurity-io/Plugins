@@ -10,7 +10,7 @@ const require_ = createRequire(import.meta.url)
 // the two never drift. No dependencies — Node is already present wherever Claude
 // Code runs.
 
-import { readFileSync, writeFileSync, openSync, readSync, fstatSync, closeSync, readdirSync, lstatSync, existsSync, mkdirSync, rmSync, renameSync } from 'node:fs';
+import { readFileSync, writeFileSync, openSync, readSync, fstatSync, closeSync, readdirSync, lstatSync, statSync, existsSync, mkdirSync, rmSync, renameSync } from 'node:fs';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { tmpdir, userInfo, hostname, homedir } from 'node:os';
@@ -85,9 +85,15 @@ function writeFailsafeCache (agent, failsafe, gatePrompts) {
 function heldFile (agent) {
   return join(tmpdir(), `clevr-held-${String(agent || 'default').replace(/[^a-zA-Z0-9_-]/g, '')}.json`);
 }
+// A shell call is the same action when its command is: Claude Code rewrites the
+// Bash `description` on every attempt, and the retry of an approved command was
+// remembered under another key, sent no resume and was held again (2026-10-11).
+// The engine compares a shell call's arguments on the command alone too.
+const HELD_SHELL_TOOL = /(bash|shell|terminal|exec|command|powershell|run|launch-process)/i;
 function actionKey (tool, input) {
   let args = '';
-  try { args = JSON.stringify(input ?? null); } catch { args = String(input ?? ''); }
+  const shell = HELD_SHELL_TOOL.test(String(tool || '')) && input && typeof input === 'object' && !Array.isArray(input) && 'command' in input;
+  try { args = JSON.stringify(shell ? { command: input.command } : (input ?? null)); } catch { args = String(input ?? ''); }
   return createHash('sha256').update(`${tool || ''}::${args}`).digest('hex').slice(0, 32);
 }
 /** The decision id this exact action was held on, if it still looks fresh. */
@@ -1250,6 +1256,111 @@ export function skillLoadsIn (toolName, toolInput, cwd, { home = homedir() } = {
     }
   } catch { /* an unreadable path loads nothing we can name */ }
   return [...found.values()];
+}
+
+// ── The scripts a command runs ──────────────────────────────────────────────
+// `bash deploy.sh` showed Clevr a name: what deploy.sh does ran unread, and a
+// line the floor refuses typed directly passed inside a script. The gate reads
+// each script a shell command runs and sends what it holds; in sensitive mode
+// only its hash leaves the machine. The brain reads it with the command (brain
+// lib/script_runs.js, shell_reconstruct.js shellRunOf).
+const SCRIPT_READ_MAX = 256 * 1024;
+const SCRIPT_SEND_MAX = 32000;
+const SCRIPT_INTERPRETER = { bash: 'shell', sh: 'shell', zsh: 'shell', dash: 'shell', ksh: 'shell', source: 'shell', '.': 'shell',
+  python: 'python', python3: 'python', node: 'javascript', bun: 'javascript', deno: 'javascript', tsx: 'javascript', 'ts-node': 'javascript',
+  ruby: 'ruby', perl: 'perl', php: 'php', pwsh: 'powershell', powershell: 'powershell' };
+const SCRIPT_EXT = { sh: 'shell', bash: 'shell', zsh: 'shell', py: 'python', js: 'javascript', mjs: 'javascript', cjs: 'javascript', ts: 'javascript',
+  rb: 'ruby', pl: 'perl', php: 'php', ps1: 'powershell' };
+// Augment's shell is `launch-process`.
+const SCRIPT_SHELL_TOOL = /(bash|shell|terminal|exec|command|powershell|run|launch-process)/i;
+const RUN_PREFIX = /^(sudo|time|nohup|exec|env|nice|command)$/;
+const ENV_ASSIGN = /^[A-Za-z_][A-Za-z0-9_]*=/;
+const extOf = (p) => { const m = /\.([A-Za-z0-9]+)$/.exec(String(p)); return m ? m[1].toLowerCase() : ''; };
+const shellWords = (s) => [...String(s).matchAll(/"((?:[^"\\]|\\.)*)"|'([^']*)'|(\S+)/g)].map((m) => m[1] ?? m[2] ?? m[3]);
+function commandOfInput (toolInput) {
+  if (typeof toolInput === 'string') return toolInput;
+  const c = toolInput && (toolInput.command ?? toolInput.cmd);
+  if (typeof c === 'string') return c;
+  if (Array.isArray(c) && c.every((x) => typeof x === 'string')) return c.join(' ');
+  return '';
+}
+function shebangLanguage (text) {
+  const m = /^#!\s*(\S+)(?:\s+(\S+))?/.exec(text);
+  if (!m) return null;
+  const prog = (m[1].endsWith('/env') ? m[2] : m[1].split('/').pop()) || '';
+  return SCRIPT_INTERPRETER[prog.replace(/[0-9.]+$/, '')] || SCRIPT_INTERPRETER[prog] || null;
+}
+function readScript (path, cwd, home, language, sensitive) {
+  const shown = String(path);
+  const abs = shown.startsWith('~/') ? join(home, shown.slice(2)) : isAbsolute(shown) ? shown : resolve(cwd || process.cwd(), shown);
+  let st;
+  try { st = statSync(abs); } catch { return { path: shown, language: language || 'shell', unread: 'missing' }; }
+  if (!st.isFile()) return null;
+  if (st.size > SCRIPT_READ_MAX) return { path: shown, language: language || 'shell', bytes: st.size, unread: 'too_large' };
+  let buf;
+  try { buf = readFileSync(abs); } catch { return { path: shown, language: language || 'shell', unread: 'unreadable' }; }
+  if (buf.subarray(0, 8192).includes(0)) return { path: shown, language: language || 'shell', bytes: buf.length, unread: 'binary' };
+  const text = buf.toString('utf8');
+  const out = { path: shown, language: language || shebangLanguage(text) || 'shell', sha256: createHash('sha256').update(buf).digest('hex'), bytes: buf.length };
+  if (sensitive) return { ...out, unread: 'sensitive' };
+  return { ...out, content: text.slice(0, SCRIPT_SEND_MAX), ...(text.length > SCRIPT_SEND_MAX ? { truncated: true } : {}) };
+}
+// A package script runs a command line kept in package.json, with its pre and
+// post scripts around it: `npm run deploy` is what scripts.deploy says.
+function packageScript (manager, words, i, cwd, sensitive) {
+  let name = null;
+  const a = words[i + 1];
+  if (a === 'run' || a === 'run-script') name = words[i + 2];
+  else if (manager === 'npm' && ['test', 't', 'start', 'stop', 'restart'].includes(a)) name = a === 't' ? 'test' : a;
+  else if (manager !== 'npm' && a && !a.startsWith('-')) name = a;
+  if (!name || name.startsWith('-')) return null;
+  let scripts;
+  try { scripts = JSON.parse(readFileSync(join(cwd || process.cwd(), 'package.json'), 'utf8')).scripts || {}; } catch { return null; }
+  const lines = [`pre${name}`, name, `post${name}`].map((k) => scripts[k]).filter((v) => typeof v === 'string' && v.trim());
+  if (!scripts[name]) return null;
+  const text = lines.join('\n');
+  const out = { path: `package.json#scripts.${name}`, language: 'shell', sha256: createHash('sha256').update(text).digest('hex'), bytes: Buffer.byteLength(text) };
+  return sensitive ? { ...out, unread: 'sensitive' } : { ...out, content: text.slice(0, SCRIPT_SEND_MAX) };
+}
+export function scriptRunsIn (toolName, toolInput, cwd, { sensitive = false, home = homedir() } = {}) {
+  if (!SCRIPT_SHELL_TOOL.test(String(toolName || ''))) return [];
+  const cmd = commandOfInput(toolInput).slice(0, 16000);
+  if (!cmd.trim()) return [];
+  const out = new Map();
+  let at = cwd || process.cwd();
+  try {
+    for (const seg of cmd.split(/&&|\|\||[;|\n]/)) {
+      if (out.size >= 4) break;
+      const words = shellWords(seg);
+      // `cd x && ./deploy.sh` runs x/deploy.sh.
+      if (words[0] === 'cd' && words[1] && words.length === 2) { at = words[1].startsWith('~/') ? join(home, words[1].slice(2)) : resolve(at, words[1]); continue; }
+      let i = 0;
+      while (i < words.length && (ENV_ASSIGN.test(words[i]) || RUN_PREFIX.test(words[i]))) i++;
+      const prog = words[i];
+      if (!prog) continue;
+      const base = prog.split('/').pop();
+      let found = null;
+      if (/^(npm|pnpm|yarn)$/.test(base)) {
+        found = packageScript(base, words, i, at, sensitive);
+      } else if (SCRIPT_INTERPRETER[base] || SCRIPT_INTERPRETER[base.replace(/[0-9.]+$/, '')]) {
+        const language = SCRIPT_INTERPRETER[base] || SCRIPT_INTERPRETER[base.replace(/[0-9.]+$/, '')];
+        let j = i + 1;
+        if (base === 'deno' && words[j] === 'run') j++;
+        if (language === 'powershell') { const f = words.findIndex((w, k) => k > i && /^-file$/i.test(w)); j = f > 0 ? f + 1 : -1; }
+        // -c, -e, -m, --eval: inline code or a module, which the brain reads itself.
+        while (j > 0 && j < words.length && words[j].startsWith('-')) { if (/^(-c|-e|-m|-p|--eval|--print|-command)$/i.test(words[j])) { j = -1; break; } j++; }
+        const path = j > 0 ? words[j] : null;
+        // An argument that is neither a script by its name nor a file is something else (python -W ignore x.py).
+        if (path && (SCRIPT_EXT[extOf(path)] || path.includes('/') || existsSync(resolve(at, path)))) found = readScript(path, at, home, language, sensitive);
+      } else if (prog.includes('/') || SCRIPT_EXT[extOf(prog)]) {
+        // ./deploy.sh, scripts/run.py, /opt/job.sh: a file run as the program.
+        found = readScript(prog, at, home, SCRIPT_EXT[extOf(prog)] || null, sensitive);
+        if (found && found.unread === 'missing' && !SCRIPT_EXT[extOf(prog)]) found = null;
+      }
+      if (found && !out.has(found.path)) out.set(found.path, found);
+    }
+  } catch { /* a command we cannot read sends no script */ }
+  return [...out.values()];
 }
 
 // The skills a person names in the prompt they type, the way their harness
