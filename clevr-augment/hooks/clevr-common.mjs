@@ -436,8 +436,18 @@ export function loadSession (cfg, sid, home = homedir()) {
 }
 
 // ── The endpoint agent's custody, over its local socket ─────────────────────
-export function custodySocketPath (home = homedir()) {
-  return process.env.CLEVR_CUSTODY_SOCK || join(home, '.clevr', 'custody.sock');
+// A local socket under the home on macOS and Linux; on Windows a named pipe
+// only this user can open, named as the endpoint agent names it (custody.go
+// pipeUser).
+export function custodySocketPath (home = homedir(), platform = process.platform, user = null) {
+  if (process.env.CLEVR_CUSTODY_SOCK) return process.env.CLEVR_CUSTODY_SOCK;
+  if (platform === 'win32') {
+    let u = user;
+    if (u == null) { try { u = userInfo().username; } catch { u = process.env.USERNAME || ''; } }
+    const name = String(u || '').toLowerCase().replace(/[^a-z0-9._-]/g, '') || 'user';
+    return `\\\\.\\pipe\\clevr-custody-${name}`;
+  }
+  return join(home, '.clevr', 'custody.sock');
 }
 const custodyMode = () => {
   const m = String(process.env.CLEVR_SESSION_CUSTODY || '').toLowerCase();
@@ -445,7 +455,7 @@ const custodyMode = () => {
 };
 // One request, one line back. Null when nothing answers (not running, too slow).
 export function custodyCall (req, { timeoutMs = 800, home = homedir() } = {}) {
-  if (process.platform === 'win32' || custodyMode() === 'off') return Promise.resolve(null);
+  if (custodyMode() === 'off') return Promise.resolve(null);
   return new Promise((resolve) => {
     let buf = '', done = false;
     const end = (v) => { if (!done) { done = true; try { sock.destroy(); } catch { /* closed */ } resolve(v); } };
