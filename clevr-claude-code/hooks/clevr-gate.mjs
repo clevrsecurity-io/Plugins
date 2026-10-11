@@ -22,7 +22,7 @@
 // clevr-common.mjs for the full CLEVR_* list.
 
 import { readFileSync } from 'node:fs';
-import { trunc, loadConfig, readConversation, postEvaluate, confirmEnforcement, machineContext, evidenceRefs, actsFor, rememberedHold, rememberHold, effectiveFailsafe, describeSkill, skillLoadsIn, gateSkillLoads, modelFields } from './clevr-common.mjs';
+import { trunc, loadConfig, readConversation, postEvaluate, confirmEnforcement, machineContext, evidenceRefs, actsFor, rememberedHold, rememberHold, effectiveFailsafe, describeSkill, skillLoadsIn, gateSkillLoads, scriptRunsIn, modelFields } from './clevr-common.mjs';
 
 function out (decision, reason) {
   if (decision) {
@@ -149,6 +149,10 @@ async function main () {
   // the tool, the arguments and its own window, so a remembered id that no
   // longer fits simply buys nothing.
   const pending = rememberedHold(cfg.agent, tool_name, tool_input);
+  // The scripts the command runs, read here: the brain judges what they hold
+  // (sensitive mode sends their hash only).
+  const scriptRuns = scriptRunsIn(tool_name, tool_input, cwd, { sensitive: !!cfg.sensitive });
+  if (scriptRuns.length) body.script_runs = scriptRuns;
   if (pending) body.resume = pending;
 
   const res = await postEvaluate(cfg, body);
