@@ -26,7 +26,7 @@ import { readFileSync } from 'node:fs';
 // shared helpers into ~/.clevr/tools together, where a repo-relative path does
 // not exist. In the repo the sibling is a one-line re-export, so there is still
 // exactly one copy of the logic.
-import { trunc, loadConfig, postEvaluate, confirmEnforcement, actsFor, rememberedHold, rememberHold, effectiveFailsafe, skillLoadsIn, gateSkillLoads, scriptRunsIn } from './clevr-common.mjs';
+import { trunc, loadConfig, postEvaluate, confirmEnforcement, actsFor, rememberedHold, rememberHold, resumeFields, effectiveFailsafe, skillLoadsIn, gateSkillLoads, scriptRunsIn } from './clevr-common.mjs';
 
 function out (decision, reason) {
   if (decision) {
@@ -116,7 +116,7 @@ async function main () {
   // (sensitive mode sends their hash only).
   const scriptRuns = scriptRunsIn(toolName, toolArgs, cwd, { sensitive: !!cfg.sensitive });
   if (scriptRuns.length) body.script_runs = scriptRuns;
-  if (pending) body.resume = pending;
+  if (pending) Object.assign(body, resumeFields(pending));
 
   const res = await postEvaluate(cfg, body);
   if (res.inactive) out(null);

@@ -96,17 +96,20 @@ function actionKey (tool, input) {
   try { args = JSON.stringify(shell ? { command: input.command } : (input ?? null)); } catch { args = String(input ?? ''); }
   return createHash('sha256').update(`${tool || ''}::${args}`).digest('hex').slice(0, 32);
 }
-/** The decision id this exact action was held on, if it still looks fresh. */
+/** The decisions this exact action was held on, newest last, if still fresh.
+ *  A retry made before the answer is held again under a new id, and the person
+ *  may approve either one: all are presented, the engine spends one. */
 export function rememberedHold (agent, tool, input) {
   try {
     const v = JSON.parse(readFileSync(heldFile(agent), 'utf8'));
     const e = v[actionKey(tool, input)];
-    if (!e || !e.id) return null;
+    const ids = e ? (Array.isArray(e.ids) ? e.ids : (e.id ? [e.id] : [])) : [];
+    if (!ids.length) return null;
     // Kept while it can still be spent: a hold waits up to a day (stepup_ttl_min
     // caps at 1440) and the engine's thirty minutes run from the approval, not
     // from the hold. Thirty minutes from the hold lost a later approval.
     if (Date.now() - Number(e.at || 0) > 25 * 3600_000) return null;
-    return e.id;
+    return ids;
   } catch { return null; }
 }
 /** Remember (or forget, with a null id) the hold on this action. */
@@ -116,13 +119,22 @@ export function rememberHold (agent, tool, input, decisionId) {
     let v = {};
     try { v = JSON.parse(readFileSync(f, 'utf8')) || {}; } catch { v = {}; }
     const k = actionKey(tool, input);
-    if (decisionId) v[k] = { id: decisionId, at: Date.now() };
+    const prev = v[k] ? (Array.isArray(v[k].ids) ? v[k].ids : (v[k].id ? [v[k].id] : [])) : [];
+    if (decisionId) v[k] = { ids: [...prev.filter((x) => x !== decisionId), decisionId].slice(-8), at: Date.now() };
     else delete v[k];
     // Keep the file small: the twenty most recent entries are plenty for a
     // session, and an unbounded map on a long-running machine is a leak.
     const keys = Object.keys(v).sort((a, b) => (v[b].at || 0) - (v[a].at || 0)).slice(0, 20);
     writeFileSync(f, JSON.stringify(Object.fromEntries(keys.map((x) => [x, v[x]]))), 'utf8');
   } catch { /* non-fatal: the worst case is one more hold */ }
+}
+
+/** The evaluate fields that present remembered holds: the latest as `resume`
+ *  (every engine reads it), the earlier ones as `resume_candidates`. */
+export function resumeFields (ids) {
+  const list = Array.isArray(ids) ? ids : (ids ? [ids] : []);
+  if (!list.length) return {};
+  return { resume: list[list.length - 1], ...(list.length > 1 ? { resume_candidates: list.slice(0, -1) } : {}) };
 }
 
 export function trunc (s, n = 300) {
@@ -1421,7 +1433,7 @@ export async function gateSkillLoads (cfg, loads, { honorShadow = false, recordO
     const body = skillLoadBody(cfg, load, ctx);
     const input = { skill: load.name };
     const pending = rememberedHold(cfg.agent, 'Skill', input);
-    if (pending) body.resume = pending;
+    if (pending) Object.assign(body, resumeFields(pending));
     const res = await postEvaluate(cfg, body);
     if (res.inactive) return null;
     if (res.failclosed) { if (recordOnly) continue; return { message: res.reason }; }

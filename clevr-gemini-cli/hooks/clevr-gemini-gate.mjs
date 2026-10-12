@@ -16,7 +16,7 @@
 // silently dropped or presented as a refusal. CLEVR_ESCALATE=allow inverts
 // that for a team that wants holds recorded and not enforced here.
 import { readFileSync } from 'node:fs';
-import { trunc, loadConfig, readConversation, postEvaluate, confirmEnforcement, actsFor, rememberedHold, rememberHold, effectiveFailsafe, describeSkill, skillLoadsIn, gateSkillLoads, scriptRunsIn } from './clevr-common.mjs';
+import { trunc, loadConfig, readConversation, postEvaluate, confirmEnforcement, actsFor, rememberedHold, rememberHold, resumeFields, effectiveFailsafe, describeSkill, skillLoadsIn, gateSkillLoads, scriptRunsIn } from './clevr-common.mjs';
 
 function out (decision, reason) {
   if (decision) process.stdout.write(JSON.stringify({ decision, reason: reason || '' }));
@@ -107,7 +107,7 @@ async function main () {
   // (sensitive mode sends their hash only).
   const scriptRuns = scriptRunsIn(tool_name, tool_input, cwd, { sensitive: !!cfg.sensitive });
   if (scriptRuns.length) body.script_runs = scriptRuns;
-  if (pending) body.resume = pending;
+  if (pending) Object.assign(body, resumeFields(pending));
 
   const res = await postEvaluate(cfg, body);
   if (res.inactive) out(null);

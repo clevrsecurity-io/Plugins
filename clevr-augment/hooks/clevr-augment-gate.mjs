@@ -20,7 +20,7 @@
 // recorded. That is a real posture some teams want, and it is a choice they make
 // rather than a default we make for them.
 import { readFileSync } from 'node:fs';
-import { trunc, loadConfig, postEvaluate, confirmEnforcement, actsFor, rememberedHold, rememberHold, effectiveFailsafe, skillLoadsIn, gateSkillLoads, scriptRunsIn } from './clevr-common.mjs';
+import { trunc, loadConfig, postEvaluate, confirmEnforcement, actsFor, rememberedHold, rememberHold, resumeFields, effectiveFailsafe, skillLoadsIn, gateSkillLoads, scriptRunsIn } from './clevr-common.mjs';
 
 function out (decision, reason) {
   if (decision) {
@@ -106,7 +106,7 @@ async function main () {
   // (sensitive mode sends their hash only).
   const scriptRuns = scriptRunsIn(tool_name, tool_input, cwd, { sensitive: !!cfg.sensitive });
   if (scriptRuns.length) body.script_runs = scriptRuns;
-  if (pending) body.resume = pending;
+  if (pending) Object.assign(body, resumeFields(pending));
 
   const res = await postEvaluate(cfg, body);
   if (res.inactive) out(null);
