@@ -33,16 +33,19 @@ Clevr MCP server only to an agent you write yourself and that wants to ask.
 ## How the guard works
 
 The host launches `clevr-mcp-guard` as if it were the server. The guard spawns
-the **real** server behind it and relays JSON-RPC both ways. Handshake,
-`tools/list`, prompts, resources and notifications pass through untouched, so a
-server the guard has never heard of still works. Every `tools/call` is posted
-to `POST /v1/evaluate` first:
+the **real** server behind it and relays JSON-RPC both ways. The handshake,
+the `*/list` discovery and notifications pass through untouched, so a server
+the guard has never heard of still works. The methods that return data outside
+a tool call (`resources/read`, `resources/subscribe`, `prompts/get`,
+`completion/complete`) are refused, and so is a JSON-RPC batch carrying a tool
+call: each call is judged on its own. Every `tools/call` is posted to
+`POST /v1/evaluate` first:
 
 | Verdict | What happens |
 |---|---|
 | Allow | forwarded, and the receipt is already signed |
 | Block | the call never reaches the server; the host gets an `isError` result carrying the reason and the decision id, so the model reads it in its own loop |
-| Hold | the same, worded as held: the person approves it in the console and runs it again |
+| Hold | the same, worded as held. Once a person approves it, the identical retry runs: the guard remembers the holds of that exact call and presents them, and the engine spends one approval, once. A retry made before the answer is held again; approving either hold is enough |
 
 The guard then confirms to the engine what it did, so the console says "did not
 run" on the guard's word rather than on the verdict alone.

@@ -62,8 +62,35 @@ async function withTimeout (p, ms) {
   try { return await p(ctl.signal); } finally { clearTimeout(t); }
 }
 
+// The holds a tools/call was refused on, per exact call, newest last: the same
+// memory as the gateway and the hook plugins. A model cannot wait for a person
+// and cannot set a header, so the identical retry presents the holds and the
+// engine spends one approval, the first given, on the same agent, tool and
+// arguments, inside its window. A retry made before the answer is held again
+// under a new id; the person may approve either. Kept 25 hours (a hold waits up
+// to a day, the engine's thirty minutes run from the answer). Lost on a
+// restart, it costs one more hold.
+const HELD_TTL_MS = 25 * 3600_000;
+const HELD_MAX = 2000;
+const held = new Map();
+const SHELL_TOOL = /(bash|shell|terminal|exec|command|powershell|run|launch-process)/i;
+const heldKey = (name, args) => `${name}::${JSON.stringify(SHELL_TOOL.test(name) && args && typeof args === 'object' && 'command' in args ? { command: args.command } : (args ?? null))}`;
+function rememberedHolds (key) {
+  const e = held.get(key);
+  if (!e) return [];
+  if (Date.now() - e.at > HELD_TTL_MS) { held.delete(key); return []; }
+  return e.ids;
+}
+function rememberHold (key, id) {
+  const prev = id ? rememberedHolds(key) : [];
+  held.delete(key);
+  if (!id) return;
+  held.set(key, { ids: [...prev.filter((x) => x !== id), id].slice(-8), at: Date.now() });
+  if (held.size > HELD_MAX) held.delete(held.keys().next().value);
+}
+
 // One tools/call, judged. Never throws: the caller applies the failsafe.
-async function evaluate (name, args, sessionId) {
+async function evaluate (name, args, sessionId, holds = []) {
   try {
     const r = await withTimeout((signal) => fetch(`${CLEVR_URL}/v1/evaluate`, {
       method: 'POST', signal,
@@ -77,6 +104,7 @@ async function evaluate (name, args, sessionId) {
         // values rather than a label. Same shape as every other Clevr gate.
         target_attr: (args && typeof args === 'object' && !Array.isArray(args)) ? args : null,
         session_id: sessionId || null,
+        ...(holds.length ? { resume: holds.at(-1), ...(holds.length > 1 ? { resume_candidates: holds.slice(0, -1) } : {}) } : {}),
         metadata: { source: 'mcp-guard-http', upstream: UPSTREAM },
       }),
     }), TIMEOUT);
@@ -98,7 +126,9 @@ const refuse = (id, text) => ({
 // resources/read pulls a file:/// or db:// resource and prompts/get returns a prompt
 // -- both sidestep the tools/call floor entirely if passed through. Mirrors the
 // gateway MCP door (UNGOVERNED_MCP). Discovery/lifecycle (initialize, *_list) pass.
-const UNGOVERNED_MCP = new Set(['resources/read', 'resources/subscribe', 'prompts/get']);
+// completion/complete autocompletes from data (ids, names, one keystroke at a
+// time), the same disclosure as resources/read.
+const UNGOVERNED_MCP = new Set(['resources/read', 'resources/subscribe', 'prompts/get', 'completion/complete']);
 const refuseMethod = (id, method) => ({
   jsonrpc: '2.0', id,
   error: { code: -32601, message: `Clevr governs tool calls on this guard; the MCP method "${method}" returns data outside that governance and is refused rather than relayed ungoverned.` },
@@ -151,6 +181,18 @@ const server = http.createServer(async (req, res) => {
   };
 
   try {
+    // A JSON-RPC batch was relayed whole, so a tool call inside one reached the
+    // server unjudged (measured: a refused files.delete ran). The calls a batch
+    // carries are refused, each with its id; a batch of discovery is relayed.
+    if (Array.isArray(msg)) {
+      const governed = (m) => m && (m.method === 'tools/call' || UNGOVERNED_MCP.has(m.method));
+      if (msg.some(governed)) {
+        return send(msg.filter((m) => m && m.id != null).map((m) => ({ jsonrpc: '2.0', id: m.id,
+          error: { code: -32600, message: 'Clevr governs tool calls one at a time; send each call on its own, not in a batch.' } })));
+      }
+      const up = await relay(msg, passHeaders);
+      return send(up.text, up.status, up.sessionId ? { 'mcp-session-id': up.sessionId } : {});
+    }
     // Data / side-effect methods we cannot govern are refused BEFORE the relay, so
     // resources/read and prompts/get cannot sidestep the tools/call floor.
     if (msg.id != null && UNGOVERNED_MCP.has(msg.method)) {
@@ -166,7 +208,13 @@ const server = http.createServer(async (req, res) => {
 
     const name = msg.params?.name || 'unknown_tool';
     const args = msg.params?.arguments ?? {};
-    const v = await evaluate(name, args, sessionId);
+    const key = heldKey(name, args);
+    const pending = rememberedHolds(key);
+    const v = await evaluate(name, args, sessionId, pending);
+    if (!v.error) {
+      if (v.effect === 'escalate' || v.effect === 'step_up') rememberHold(key, v.decision_id);
+      else if (pending.length) rememberHold(key, null);
+    }
 
     if (v.error) {
       if (FAILSAFE === 'closed') {
@@ -186,7 +234,7 @@ const server = http.createServer(async (req, res) => {
       // nobody is told a queued action was forbidden.
       confirmDenied(v.decision_id);
       return send(refuse(msg.id,
-        `Held for review, not refused: ${reason} Approve it in Clevr (or from Slack or Teams) and run it again.${tag}`));
+        `Held for review, not refused: ${reason} Once it is approved in Clevr (or from Slack or Teams), make exactly the same call again.${tag}`));
     }
 
     const up = await relay(msg, passHeaders);

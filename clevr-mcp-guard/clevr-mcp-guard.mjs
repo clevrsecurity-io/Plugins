@@ -10,8 +10,9 @@
 //   allow / log      -> forward to the upstream tool (runs normally)
 //   block            -> the call NEVER reaches the tool; the host gets an
 //                       isError result carrying the Clevr reason
-//   escalate/step_up -> held (same as block here; a stdio proxy cannot await an
-//                       async console approval). CLEVR_MODE=shadow records only.
+//   escalate/step_up -> held: not forwarded, worded as held; once a person
+//                       approves it, the identical retry presents the hold and
+//                       runs. CLEVR_MODE=shadow records only.
 //
 // Every verdict is sealed server-side into Clevr's signed, hash-chained audit
 // log, exactly like a Claude Code hook or an MCP gateway call. This is the
@@ -136,8 +137,34 @@ function httpGetJson (urlStr, { headers = {}, timeoutMs = 5000 } = {}) {
   } catch { /* brain unreachable at boot; bootstrap stands */ }
 })()
 
+// The holds a tools/call was refused on, per exact call, newest last: the same
+// memory as the gateway and the hook plugins. The host's model cannot wait for
+// a person, so the identical retry presents the holds and the engine spends one
+// approval, the first given, on the same agent, tool and arguments, inside its
+// window. A retry made before the answer is held again under a new id; the
+// person may approve either. Kept 25 hours; lost with this process, it costs
+// one more hold.
+const HELD_TTL_MS = 25 * 3600_000
+const HELD_MAX = 2000
+const held = new Map()
+const SHELL_TOOL = /(bash|shell|terminal|exec|command|powershell|run|launch-process)/i
+const heldKey = (name, args) => `${name}::${JSON.stringify(SHELL_TOOL.test(name) && args && typeof args === 'object' && 'command' in args ? { command: args.command } : (args ?? null))}`
+function rememberedHolds (key) {
+  const e = held.get(key)
+  if (!e) return []
+  if (Date.now() - e.at > HELD_TTL_MS) { held.delete(key); return [] }
+  return e.ids
+}
+function rememberHold (key, id) {
+  const prev = id ? rememberedHolds(key) : []
+  held.delete(key)
+  if (!id) return
+  held.set(key, { ids: [...prev.filter((x) => x !== id), id].slice(-8), at: Date.now() })
+  if (held.size > HELD_MAX) held.delete(held.keys().next().value)
+}
+
 // Ask the engine about one tools/call. Returns {effect, reason, decision_id}.
-async function evaluate (name, args) {
+async function evaluate (name, args, holds = []) {
   try {
     const res = await httpPostJson(`${CFG.url}/v1/evaluate`, {
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${CFG.key}` },
@@ -150,6 +177,7 @@ async function evaluate (name, args) {
         // Surface the tool arguments so deterministic argument rules
         // (target.<field>) can gate on them, mirroring the hook + SDK adapters.
         target_attr: (args && typeof args === 'object' && !Array.isArray(args)) ? args : null,
+        ...(holds.length ? { resume: holds.at(-1), ...(holds.length > 1 ? { resume_candidates: holds.slice(0, -1) } : {}) } : {}),
         metadata: { source: 'mcp-guard', host: CFG.agent, upstream: upstreamCmd[0] },
       }),
     })
@@ -175,11 +203,15 @@ function confirmEnforcement (decisionId, enforced) {
 
 // A JSON-RPC result that tells the host the tool was denied, WITHOUT running it.
 // isError:true is the MCP convention for a tool-level failure the model sees.
-function denyResult (id, reason, decisionId) {
+function denyResult (id, reason, decisionId, held = false) {
   const tag = decisionId ? ` [${decisionId}]` : ''
+  // A hold is not a refusal: it says so, and what clears it.
+  const text = held
+    ? `Held for review, not refused: ${reason || 'policy'} Once it is approved in Clevr, make exactly the same call again.${tag}`
+    : `Blocked by Clevr: ${reason || 'policy'}${tag}`
   send({
     jsonrpc: '2.0', id,
-    result: { isError: true, content: [{ type: 'text', text: `Blocked by Clevr: ${reason || 'policy'}${tag}` }] },
+    result: { isError: true, content: [{ type: 'text', text }] },
   })
   confirmEnforcement(decisionId, 'denied')
 }
@@ -190,7 +222,9 @@ function denyResult (id, reason, decisionId) {
 // through ungoverned. Mirrors the gateway MCP door (UNGOVERNED_MCP). Discovery /
 // lifecycle (initialize, tools/list, resources/list, prompts/list) and
 // notifications still pass; a later change can evaluate these through the engine.
-const UNGOVERNED_MCP = new Set(['resources/read', 'resources/subscribe', 'prompts/get'])
+// completion/complete autocompletes from data (ids, names, one keystroke at a
+// time), the same disclosure as resources/read.
+const UNGOVERNED_MCP = new Set(['resources/read', 'resources/subscribe', 'prompts/get', 'completion/complete'])
 function refuseMethod (id, method) {
   send({ jsonrpc: '2.0', id, error: { code: -32601, message: `Clevr governs tool calls on this guard; the MCP method "${method}" returns data outside that governance and is refused rather than forwarded ungoverned.` } })
 }
@@ -215,13 +249,30 @@ rl.on('close', () => { chain.finally(() => { try { up.stdin.end() } catch {} }) 
 async function handle (line) {
   let msg
   try { msg = JSON.parse(line) } catch { return forward(line) } // not JSON we understand -> pass through
-  if (!active || msg.id == null) return forward(line)                   // inactive guard / notifications pass through
+  if (!active) return forward(line)                                     // inactive guard passes through
+  // A JSON-RPC batch has no id of its own, so it was forwarded whole and a tool
+  // call inside one reached the upstream unjudged. The calls a batch carries
+  // are refused, each with its id; a batch of discovery passes.
+  if (Array.isArray(msg)) {
+    if (!msg.some((m) => m && (m.method === 'tools/call' || UNGOVERNED_MCP.has(m.method)))) return forward(line)
+    const errs = msg.filter((m) => m && m.id != null).map((m) => ({ jsonrpc: '2.0', id: m.id,
+      error: { code: -32600, message: 'Clevr governs tool calls one at a time; send each call on its own, not in a batch.' } }))
+    if (errs.length) send(errs)
+    return
+  }
+  if (msg.id == null) return forward(line)                               // notifications pass through
   if (UNGOVERNED_MCP.has(msg.method)) return refuseMethod(msg.id, msg.method)  // data pull we cannot govern -> refuse
   if (msg.method !== 'tools/call') return forward(line)
 
   const name = msg.params?.name || 'tool'
   const args = msg.params?.arguments
-  const v = await evaluate(name, args)
+  const key = heldKey(name, args)
+  const pending = rememberedHolds(key)
+  const v = await evaluate(name, args, pending)
+  if (!v.error) {
+    if (v.effect === 'escalate' || v.effect === 'step_up') rememberHold(key, v.decision_id)
+    else if (pending.length) rememberHold(key, null)
+  }
 
   if (v.error) {
     // Engine unreachable → the agent's cached fail policy (workspace default or
@@ -233,7 +284,7 @@ async function handle (line) {
   if (v.failsafe === 'open' || v.failsafe === 'closed') cachedFailsafe = v.failsafe
   const effect = v.effect
   const blocked = effect === 'block' || effect === 'escalate' || effect === 'step_up'
-  if (blocked && !CFG.shadow) return denyResult(msg.id, v.reason, v.decision_id)
+  if (blocked && !CFG.shadow) return denyResult(msg.id, v.reason, v.decision_id, effect !== 'block')
   // A blocking verdict this machine let through (shadow) is an allow it chose:
   // confirm it, so the console shows the call ran rather than "not confirmed".
   if (blocked) confirmEnforcement(v.decision_id, 'allowed')

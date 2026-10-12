@@ -42,6 +42,12 @@ const seenMethods = [];              // every method the upstream actually recei
 const upstream = http.createServer(async (req, res) => {
   const c = []; for await (const x of req) c.push(x);
   const m = JSON.parse(Buffer.concat(c).toString() || '{}');
+  // A batch is answered member by member, so a tool call that rides one runs.
+  if (Array.isArray(m)) {
+    for (const x of m) { seenMethods.push(x.method); if (x.method === 'tools/call') ran.push(x.params?.name); }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify(m.filter((x) => x.id != null).map((x) => ({ jsonrpc: '2.0', id: x.id, result: { content: [{ type: 'text', text: `ran ${x.params?.name}` }] } }))));
+  }
   seenMethods.push(m.method);
   const send = (result) => {
     res.writeHead(200, { 'Content-Type': 'application/json', 'mcp-session-id': 'sess-upstream' });
@@ -57,11 +63,19 @@ const upstream = http.createServer(async (req, res) => {
 // Verdict by tool name, so the test says what it means: delete is refused,
 // export is held, everything else passes.
 let engineDown = false;
+// A hold the engine spends only when its approved id is among those presented.
+let holds = 0, approved = null, presented = null;
 const engine = http.createServer(async (req, res) => {
   if (engineDown) { req.destroy(); return; }
   const c = []; for await (const x of req) c.push(x);
   const body = JSON.parse(Buffer.concat(c).toString() || '{}');
   const tool = String(body.tool || '');
+  if (/publish/.test(tool)) {
+    presented = [...(body.resume_candidates || []), ...(body.resume ? [body.resume] : [])];
+    const run = approved && presented.includes(approved);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify(run ? { effect: 'allow', decision_id: 'dec_run' } : { effect: 'escalate', reason: 'a person decides', decision_id: `dec_hold_${++holds}` }));
+  }
   const effect = /delete/.test(tool) ? 'block' : /export/.test(tool) ? 'escalate' : 'allow';
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({
@@ -146,7 +160,7 @@ async function main () {
 
   console.log('\n— it refuses the data methods it cannot govern, not relay them —');
   const errCode = (r) => r.json?.error?.code;
-  for (const method of ['resources/read', 'resources/subscribe', 'prompts/get']) {
+  for (const method of ['resources/read', 'resources/subscribe', 'prompts/get', 'completion/complete']) {
     const before = seenMethods.length;
     const r = await rpc({ jsonrpc: '2.0', id: 9, method, params: { uri: 'file:///etc/passwd' } });
     ok(`${method} is refused with a JSON-RPC error (-32601)`, errCode(r) === -32601, JSON.stringify(r.json));
@@ -171,13 +185,36 @@ async function main () {
 
   const held = await call('bulk.export', { to: 'https://drop.example/x' });
   ok('a hold says it is held, not refused, and how to clear it',
-    refused(held) && /Held for review, not refused/.test(said(held)) && /run it again/.test(said(held)), said(held));
+    refused(held) && /Held for review, not refused/.test(said(held)) && /make exactly the same call again/.test(said(held)), said(held));
 
   console.log('\n— it sends the real arguments, not a label —');
   const seen = await call('db.query', { sql: 'select * from customers', limit: 10 });
   ok('the engine receives the tool arguments',
     !refused(seen),
     'an argument rule (target.<field>) is worthless if the gate never forwards them');
+
+  console.log('\n— a tool call cannot ride a batch past the gate —');
+  const beforeBatch = ran.length;
+  const batch = await rpc([{ jsonrpc: '2.0', id: 21, method: 'tools/list' }, { jsonrpc: '2.0', id: 22, method: 'tools/call', params: { name: 'files.delete', arguments: { path: '/' } } }]);
+  ok('a batch carrying a tool call is refused', Array.isArray(batch.json) && batch.json.every((r) => r.error), JSON.stringify(batch.json));
+  ok('and nothing in it reached the server', ran.length === beforeBatch, `the upstream ran ${JSON.stringify(ran.slice(beforeBatch))}`);
+  const listBatch = await rpc([{ jsonrpc: '2.0', id: 23, method: 'tools/list' }]);
+  ok('a batch of discovery only is still relayed', Array.isArray(listBatch.json) && !listBatch.json[0]?.error, JSON.stringify(listBatch.json));
+
+  console.log('\n— an approval runs the retry, even when the agent retried before the answer —');
+  const h1 = await call('report.publish', { id: 42 });
+  const h2 = await call('report.publish', { id: 42 });
+  ok('held twice before anyone answered', refused(h1) && refused(h2) && /dec_hold_1/.test(said(h1)) && /dec_hold_2/.test(said(h2)), said(h2));
+  approved = 'dec_hold_1';
+  const beforeRun = ran.length;
+  const run = await call('report.publish', { id: 42 });
+  ok('the first hold approved, the identical retry runs', !refused(run) && ran.length === beforeRun + 1, said(run));
+  ok('both holds were presented, the latest as resume', JSON.stringify(presented) === '["dec_hold_1","dec_hold_2"]', JSON.stringify(presented));
+  const changed = await call('report.publish', { id: 43 });
+  ok('other arguments present nothing', refused(changed) && JSON.stringify(presented) === '[]', JSON.stringify(presented));
+  const again = await call('report.publish', { id: 42 });
+  ok('after it ran the holds are forgotten', refused(again) && JSON.stringify(presented) === '[]', JSON.stringify(presented));
+  approved = null;
 
   console.log('\n— the failsafe —');
   engineDown = true;
@@ -201,7 +238,7 @@ async function main () {
   // are absent, which is the point: three tool calls were made through the guard
   // and only the ones it cleared were run.
   ok(`the upstream ran ${JSON.stringify(ran)}`,
-    JSON.stringify(ran) === '["db.query","db.query","files.delete"]',
+    JSON.stringify(ran) === '["db.query","db.query","report.publish","files.delete"]',
     'the upstream log is the only claim that cannot be argued with');
 
   guard.kill();
