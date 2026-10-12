@@ -35,7 +35,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 let pass = 0, fail = 0
 const ok = (c, n, d = '') => { if (c) { pass++; console.log('  ok  ', n) } else { fail++; console.log('  FAIL', n, d) } }
 
-let holds = 0, approved = null, presented = null
+let holds = 0, approved = null, presented = null, joins = 0
 const engine = http.createServer((req, res) => {
   let b = ''; req.on('data', (c) => (b += c))
   req.on('end', () => {
@@ -46,6 +46,13 @@ const engine = http.createServer((req, res) => {
     if (/publish/.test(tool)) {
       presented = [...(body.resume_candidates || []), ...(body.resume ? [body.resume] : [])]
       v = approved && presented.includes(approved) ? { effect: 'allow', decision_id: 'dec_run' } : { effect: 'escalate', reason: 'a person decides.', decision_id: `dec_hold_${++holds}` }
+    }
+    // The engine joins a retry made while the same action waits (held_as).
+    if (/invoice/.test(tool)) {
+      presented = [...(body.resume_candidates || []), ...(body.resume ? [body.resume] : [])]
+      v = approved && presented.includes(approved) ? { effect: 'allow', decision_id: 'dec_run' }
+        : ++joins === 1 ? { effect: 'escalate', reason: 'a person decides.', decision_id: 'dec_join_1' }
+          : { effect: 'escalate', reason: 'a person decides.', decision_id: `dec_joined_${joins}`, held_as: 'dec_join_1' }
     }
     res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(v))
   })
@@ -104,6 +111,20 @@ try {
   call(9, 'report.publish', { id: 42 })
   await reply(9)
   ok(JSON.stringify(presented) === '[]', 'after it ran the holds are forgotten', JSON.stringify(presented))
+
+  console.log('— a retry joined to the request already waiting names and presents that request —')
+  approved = null
+  call(10, 'invoice.send', { id: 7 })
+  await reply(10)
+  call(11, 'invoice.send', { id: 7 })
+  const j = await reply(11)
+  ok(/\[dec_join_1\]/.test(text(j)) && !/dec_joined_/.test(text(j)), 'the joined retry names the request', text(j))
+  call(12, 'invoice.send', { id: 7 })
+  await reply(12)
+  ok(JSON.stringify(presented) === '["dec_join_1"]', 'only the request is presented, however often it was retried', JSON.stringify(presented))
+  approved = 'dec_join_1'
+  call(13, 'invoice.send', { id: 7 })
+  ok(/ran invoice\.send/.test(text(await reply(13))), 'the request approved, the identical retry runs')
 } finally {
   guard.kill(); engine.close()
   try { fs.rmSync(TMP, { recursive: true, force: true }) } catch {}

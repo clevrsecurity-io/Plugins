@@ -212,7 +212,8 @@ const server = http.createServer(async (req, res) => {
     const pending = rememberedHolds(key);
     const v = await evaluate(name, args, sessionId, pending);
     if (!v.error) {
-      if (v.effect === 'escalate' || v.effect === 'step_up') rememberHold(key, v.decision_id);
+      // A retry joined to the request already waiting (held_as) presents it.
+      if (v.effect === 'escalate' || v.effect === 'step_up') rememberHold(key, v.held_as || v.decision_id);
       else if (pending.length) rememberHold(key, null);
     }
 
@@ -225,7 +226,8 @@ const server = http.createServer(async (req, res) => {
       return send(up.text, up.status, up.sessionId ? { 'mcp-session-id': up.sessionId } : {});
     }
 
-    const tag = v.decision_id ? ` [${v.decision_id}]` : '';
+    const heldId = (v.effect !== 'block' && v.held_as) || v.decision_id;
+    const tag = heldId ? ` [${heldId}]` : '';
     const reason = (v.effect === 'block' ? v.block_message : v.stepup_message) || v.reason || 'policy';
     if (v.effect === 'block') { confirmDenied(v.decision_id); return send(refuse(msg.id, `Blocked by Clevr: ${reason}${tag}`)); }
     if (v.effect === 'escalate' || v.effect === 'step_up') {

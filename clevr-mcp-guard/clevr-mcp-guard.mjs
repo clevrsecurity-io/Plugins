@@ -203,8 +203,9 @@ function confirmEnforcement (decisionId, enforced) {
 
 // A JSON-RPC result that tells the host the tool was denied, WITHOUT running it.
 // isError:true is the MCP convention for a tool-level failure the model sees.
-function denyResult (id, reason, decisionId, held = false) {
-  const tag = decisionId ? ` [${decisionId}]` : ''
+function denyResult (id, reason, decisionId, held = false, heldAs = null) {
+  const shown = (held && heldAs) || decisionId
+  const tag = shown ? ` [${shown}]` : ''
   // A hold is not a refusal: it says so, and what clears it.
   const text = held
     ? `Held for review, not refused: ${reason || 'policy'} Once it is approved in Clevr, make exactly the same call again.${tag}`
@@ -270,7 +271,8 @@ async function handle (line) {
   const pending = rememberedHolds(key)
   const v = await evaluate(name, args, pending)
   if (!v.error) {
-    if (v.effect === 'escalate' || v.effect === 'step_up') rememberHold(key, v.decision_id)
+    // A retry joined to the request already waiting (held_as) presents it.
+    if (v.effect === 'escalate' || v.effect === 'step_up') rememberHold(key, v.held_as || v.decision_id)
     else if (pending.length) rememberHold(key, null)
   }
 
@@ -284,7 +286,7 @@ async function handle (line) {
   if (v.failsafe === 'open' || v.failsafe === 'closed') cachedFailsafe = v.failsafe
   const effect = v.effect
   const blocked = effect === 'block' || effect === 'escalate' || effect === 'step_up'
-  if (blocked && !CFG.shadow) return denyResult(msg.id, v.reason, v.decision_id, effect !== 'block')
+  if (blocked && !CFG.shadow) return denyResult(msg.id, v.reason, v.decision_id, effect !== 'block', v.held_as || null)
   // A blocking verdict this machine let through (shadow) is an allow it chose:
   // confirm it, so the console shows the call ran rather than "not confirmed".
   if (blocked) confirmEnforcement(v.decision_id, 'allowed')

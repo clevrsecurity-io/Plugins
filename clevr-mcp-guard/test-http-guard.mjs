@@ -64,7 +64,7 @@ const upstream = http.createServer(async (req, res) => {
 // export is held, everything else passes.
 let engineDown = false;
 // A hold the engine spends only when its approved id is among those presented.
-let holds = 0, approved = null, presented = null;
+let holds = 0, approved = null, presented = null, joins = 0;
 const engine = http.createServer(async (req, res) => {
   if (engineDown) { req.destroy(); return; }
   const c = []; for await (const x of req) c.push(x);
@@ -75,6 +75,15 @@ const engine = http.createServer(async (req, res) => {
     const run = approved && presented.includes(approved);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify(run ? { effect: 'allow', decision_id: 'dec_run' } : { effect: 'escalate', reason: 'a person decides', decision_id: `dec_hold_${++holds}` }));
+  }
+  // The engine joins a retry made while the same action waits (held_as).
+  if (/invoice/.test(tool)) {
+    presented = [...(body.resume_candidates || []), ...(body.resume ? [body.resume] : [])];
+    const run = approved && presented.includes(approved);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify(run ? { effect: 'allow', decision_id: 'dec_run' }
+      : ++joins === 1 ? { effect: 'escalate', reason: 'a person decides', decision_id: 'dec_join_1' }
+        : { effect: 'escalate', reason: 'a person decides', decision_id: `dec_joined_${joins}`, held_as: 'dec_join_1' }));
   }
   const effect = /delete/.test(tool) ? 'block' : /export/.test(tool) ? 'escalate' : 'allow';
   res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -216,6 +225,18 @@ async function main () {
   ok('after it ran the holds are forgotten', refused(again) && JSON.stringify(presented) === '[]', JSON.stringify(presented));
   approved = null;
 
+  console.log('\n— a retry joined to the request already waiting names and presents that request —');
+  await call('invoice.send', { id: 7 });
+  const joined = await call('invoice.send', { id: 7 });
+  ok('the joined retry names the request', refused(joined) && /\[dec_join_1\]/.test(said(joined)) && !/dec_joined_/.test(said(joined)), said(joined));
+  await call('invoice.send', { id: 7 });
+  ok('only the request is presented, however often it was retried', JSON.stringify(presented) === '["dec_join_1"]', JSON.stringify(presented));
+  approved = 'dec_join_1';
+  const beforeJoinRun = ran.length;
+  const joinRun = await call('invoice.send', { id: 7 });
+  ok('the request approved, the identical retry runs', !refused(joinRun) && ran.length === beforeJoinRun + 1, said(joinRun));
+  approved = null;
+
   console.log('\n— the failsafe —');
   engineDown = true;
   const openCall = await call('files.delete', { path: '/tmp/x' });
@@ -233,12 +254,13 @@ async function main () {
   engineDown = false;
 
   console.log('\n— the whole run, from the server\'s side —');
-  // Two db.query (the allow and the argument check), one files.delete, and that
+  // Two db.query (the allow and the argument check), each approved retry once
+  // (report.publish, invoice.send), one files.delete, and that
   // one is the fail-open forward. The refused delete and the fail-closed query
   // are absent, which is the point: three tool calls were made through the guard
   // and only the ones it cleared were run.
   ok(`the upstream ran ${JSON.stringify(ran)}`,
-    JSON.stringify(ran) === '["db.query","db.query","report.publish","files.delete"]',
+    JSON.stringify(ran) === '["db.query","db.query","report.publish","invoice.send","files.delete"]',
     'the upstream log is the only claim that cannot be argued with');
 
   guard.kill();
