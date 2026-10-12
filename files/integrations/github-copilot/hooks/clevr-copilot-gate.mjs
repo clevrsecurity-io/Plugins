@@ -26,7 +26,7 @@ import { readFileSync } from 'node:fs';
 // shared helpers into ~/.clevr/tools together, where a repo-relative path does
 // not exist. In the repo the sibling is a one-line re-export, so there is still
 // exactly one copy of the logic.
-import { trunc, loadConfig, postEvaluate, confirmEnforcement, actsFor, rememberedHold, rememberHold, effectiveFailsafe, skillLoadsIn, gateSkillLoads } from './clevr-common.mjs';
+import { trunc, loadConfig, postEvaluate, confirmEnforcement, actsFor, rememberedHold, rememberHold, resumeFields, effectiveFailsafe, skillLoadsIn, gateSkillLoads, scriptRunsIn } from './clevr-common.mjs';
 
 function out (decision, reason) {
   if (decision) {
@@ -112,7 +112,11 @@ async function main () {
   // agent, the tool, the arguments and its own window, so a remembered id
   // that no longer fits simply buys nothing.
   const pending = rememberedHold(cfg.agent, toolName, toolArgs);
-  if (pending) body.resume = pending;
+  // The scripts the command runs, read here: the brain judges what they hold
+  // (sensitive mode sends their hash only).
+  const scriptRuns = scriptRunsIn(toolName, toolArgs, cwd, { sensitive: !!cfg.sensitive });
+  if (scriptRuns.length) body.script_runs = scriptRuns;
+  if (pending) Object.assign(body, resumeFields(pending));
 
   const res = await postEvaluate(cfg, body);
   if (res.inactive) out(null);

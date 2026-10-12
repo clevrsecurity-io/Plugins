@@ -22,7 +22,7 @@
 // clevr-common.mjs for the full CLEVR_* list.
 
 import { readFileSync } from 'node:fs';
-import { trunc, loadConfig, readConversation, postEvaluate, confirmEnforcement, machineContext, evidenceRefs, actsFor, rememberedHold, rememberHold, effectiveFailsafe, describeSkill, skillLoadsIn, gateSkillLoads, modelFields } from './clevr-common.mjs';
+import { trunc, loadConfig, readConversation, postEvaluate, confirmEnforcement, machineContext, evidenceRefs, actsFor, rememberedHold, rememberHold, resumeFields, effectiveFailsafe, describeSkill, skillLoadsIn, gateSkillLoads, scriptRunsIn, modelFields } from './clevr-common.mjs';
 
 function out (decision, reason) {
   if (decision) {
@@ -71,7 +71,7 @@ async function main () {
     out(null);
   }
 
-  const { tool_name = 'unknown', tool_input = {}, session_id, transcript_path, cwd, agent_id, agent_type } = hook;
+  const { tool_name = 'unknown', tool_input = {}, tool_use_id, session_id, transcript_path, cwd, agent_id, agent_type } = hook;
   const { action_type, action, target } = classify(tool_name, tool_input);
 
   // Delegation lineage (ASSERTED, not IdP-verified). Claude Code populates
@@ -113,9 +113,11 @@ async function main () {
     target_attr: cfg.sensitive ? null : ((tool_input && typeof tool_input === 'object' && !Array.isArray(tool_input)) ? tool_input : null),
     // The machine's system (win32, darwin, linux): the engine sorts the shell's
     // system commands by kind per system (brain lib/system_commands.js).
+    // tool_use_id: the harness's id for this call, which its result hook sends
+    // too, so the call and the result it got can be joined (an id, no content).
     metadata: cfg.sensitive
-      ? { cwd, os: process.platform, source: cfg.source, agent_id: agent_id || null, agent_type: agent_type || null, sensitive: true }
-      : { input: tool_input, cwd, os: process.platform, source: cfg.source, agent_id: agent_id || null, agent_type: agent_type || null },
+      ? { cwd, os: process.platform, source: cfg.source, agent_id: agent_id || null, agent_type: agent_type || null, tool_use_id: tool_use_id || null, sensitive: true }
+      : { input: tool_input, cwd, os: process.platform, source: cfg.source, agent_id: agent_id || null, agent_type: agent_type || null, tool_use_id: tool_use_id || null },
     ...(cfg.sensitive ? { sensitive: true } : {}),
   };
   // A skill load names the skill, and says what this machine loaded under that
@@ -147,7 +149,11 @@ async function main () {
   // the tool, the arguments and its own window, so a remembered id that no
   // longer fits simply buys nothing.
   const pending = rememberedHold(cfg.agent, tool_name, tool_input);
-  if (pending) body.resume = pending;
+  // The scripts the command runs, read here: the brain judges what they hold
+  // (sensitive mode sends their hash only).
+  const scriptRuns = scriptRunsIn(tool_name, tool_input, cwd, { sensitive: !!cfg.sensitive });
+  if (scriptRuns.length) body.script_runs = scriptRuns;
+  if (pending) Object.assign(body, resumeFields(pending));
 
   const res = await postEvaluate(cfg, body);
   if (res.inactive) out(null);

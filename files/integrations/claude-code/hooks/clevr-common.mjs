@@ -10,13 +10,14 @@ const require_ = createRequire(import.meta.url)
 // the two never drift. No dependencies — Node is already present wherever Claude
 // Code runs.
 
-import { readFileSync, writeFileSync, openSync, readSync, fstatSync, closeSync, readdirSync, lstatSync, existsSync, mkdirSync, rmSync, renameSync } from 'node:fs';
+import { readFileSync, writeFileSync, openSync, readSync, fstatSync, closeSync, readdirSync, lstatSync, statSync, existsSync, mkdirSync, rmSync, renameSync } from 'node:fs';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { tmpdir, userInfo, hostname, homedir } from 'node:os';
 import { join, dirname, basename, relative, resolve, isAbsolute, sep } from 'node:path';
 import http from 'node:http';
-import { createHash, randomBytes } from 'node:crypto';
+import net from 'node:net';
+import { createHash, randomBytes, generateKeyPairSync, createPrivateKey, sign as edSign } from 'node:crypto';
 import { TextDecoder } from 'node:util';
 import https from 'node:https';
 
@@ -84,21 +85,31 @@ function writeFailsafeCache (agent, failsafe, gatePrompts) {
 function heldFile (agent) {
   return join(tmpdir(), `clevr-held-${String(agent || 'default').replace(/[^a-zA-Z0-9_-]/g, '')}.json`);
 }
+// A shell call is the same action when its command is: Claude Code rewrites the
+// Bash `description` on every attempt, and the retry of an approved command was
+// remembered under another key, sent no resume and was held again (2026-10-11).
+// The engine compares a shell call's arguments on the command alone too.
+const HELD_SHELL_TOOL = /(bash|shell|terminal|exec|command|powershell|run|launch-process)/i;
 function actionKey (tool, input) {
   let args = '';
-  try { args = JSON.stringify(input ?? null); } catch { args = String(input ?? ''); }
+  const shell = HELD_SHELL_TOOL.test(String(tool || '')) && input && typeof input === 'object' && !Array.isArray(input) && 'command' in input;
+  try { args = JSON.stringify(shell ? { command: input.command } : (input ?? null)); } catch { args = String(input ?? ''); }
   return createHash('sha256').update(`${tool || ''}::${args}`).digest('hex').slice(0, 32);
 }
-/** The decision id this exact action was held on, if it still looks fresh. */
+/** The decisions this exact action was held on, newest last, if still fresh.
+ *  A retry made before the answer is held again under a new id, and the person
+ *  may approve either one: all are presented, the engine spends one. */
 export function rememberedHold (agent, tool, input) {
   try {
     const v = JSON.parse(readFileSync(heldFile(agent), 'utf8'));
     const e = v[actionKey(tool, input)];
-    if (!e || !e.id) return null;
-    // The engine's own window is thirty minutes; anything older cannot be spent,
-    // so there is no point sending it.
-    if (Date.now() - Number(e.at || 0) > 30 * 60_000) return null;
-    return e.id;
+    const ids = e ? (Array.isArray(e.ids) ? e.ids : (e.id ? [e.id] : [])) : [];
+    if (!ids.length) return null;
+    // Kept while it can still be spent: a hold waits up to a day (stepup_ttl_min
+    // caps at 1440) and the engine's thirty minutes run from the approval, not
+    // from the hold. Thirty minutes from the hold lost a later approval.
+    if (Date.now() - Number(e.at || 0) > 25 * 3600_000) return null;
+    return ids;
   } catch { return null; }
 }
 /** Remember (or forget, with a null id) the hold on this action. */
@@ -108,13 +119,22 @@ export function rememberHold (agent, tool, input, decisionId) {
     let v = {};
     try { v = JSON.parse(readFileSync(f, 'utf8')) || {}; } catch { v = {}; }
     const k = actionKey(tool, input);
-    if (decisionId) v[k] = { id: decisionId, at: Date.now() };
+    const prev = v[k] ? (Array.isArray(v[k].ids) ? v[k].ids : (v[k].id ? [v[k].id] : [])) : [];
+    if (decisionId) v[k] = { ids: [...prev.filter((x) => x !== decisionId), decisionId].slice(-8), at: Date.now() };
     else delete v[k];
     // Keep the file small: the twenty most recent entries are plenty for a
     // session, and an unbounded map on a long-running machine is a leak.
     const keys = Object.keys(v).sort((a, b) => (v[b].at || 0) - (v[a].at || 0)).slice(0, 20);
     writeFileSync(f, JSON.stringify(Object.fromEntries(keys.map((x) => [x, v[x]]))), 'utf8');
   } catch { /* non-fatal: the worst case is one more hold */ }
+}
+
+/** The evaluate fields that present remembered holds: the latest as `resume`
+ *  (every engine reads it), the earlier ones as `resume_candidates`. */
+export function resumeFields (ids) {
+  const list = Array.isArray(ids) ? ids : (ids ? [ids] : []);
+  if (!list.length) return {};
+  return { resume: list[list.length - 1], ...(list.length > 1 ? { resume_candidates: list.slice(0, -1) } : {}) };
 }
 
 export function trunc (s, n = 300) {
@@ -368,12 +388,205 @@ function httpPostJson (urlStr, { headers = {}, body = '', timeoutMs = 15000 } = 
       let data = '';
       res.setEncoding('utf8');
       res.on('data', (c) => { data += c; });
-      res.on('end', () => resolve({ status: res.statusCode || 0, body: data }));
+      res.on('end', () => resolve({ status: res.statusCode || 0, body: data, headers: res.headers || {} }));
     });
     req.on('error', reject);
     req.setTimeout(timeoutMs, () => req.destroy(new Error(`timeout after ${timeoutMs}ms`)));
     req.end(payload);
   });
+}
+
+// ── A session opened with its own key ───────────────────────────────────────
+// The engine can bind a session to a key this machine holds (brain
+// lib/session_identity.js, docs/api/sessions.mdx): the session is opened once
+// with POST /v1/sessions, and every call of it then carries the token and the
+// key's signature. Stopping the session in Clevr revokes the token, so it cannot
+// be continued under another session id.
+//
+// Signed when the workspace asks (its session_proof, observe or require, read
+// back from the last verdict) or when this machine does (CLEVR_SESSION_PROOF=1;
+// =0 never). A workspace with it off sees no change at all: a proof that failed
+// would be refused, so nothing is signed that nobody asked for.
+//
+// Where the key lives. With the endpoint agent's custody running on this
+// machine (clevr-endpoint --custody), the key is made and kept in its memory
+// and never touches the disk: this hook asks it to sign, and it signs only for
+// processes under the harness that opened the session (endpoint-agent/go/
+// custody.go). Without it, the key is written once to a file only this user
+// can read; the model runs commands as the same user and could read that file.
+// CLEVR_SESSION_CUSTODY=require signs only through custody (no file key ever),
+// =off never asks it; the default uses it when it answers.
+const b64url = (buf) => Buffer.from(buf).toString('base64').replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
+// MUST match brain lib/session_identity.js callDigest and sessionSigningString
+// byte for byte (brain/test_session_identity.mjs checks it).
+export function sessionCallDigest ({ tool = '', action = '', target = '', args = null } = {}) {
+  const canon = JSON.stringify([String(tool || ''), String(action || ''), String(target || ''), args == null ? null : args]);
+  return b64url(createHash('sha256').update(canon).digest());
+}
+export function sessionSigningString ({ sid, agent, digest, ts, nonce }) {
+  return ['clevr-session-v1', sid || '', agent || '', digest || '', String(ts || ''), nonce || ''].join('\n');
+}
+const safeName = (s) => String(s || 'default').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 60) || 'default';
+function sessionsDir (home = homedir()) { return join(home, '.clevr', 'sessions'); }
+function sessionFile (agent, sid, home = homedir()) {
+  return join(sessionsDir(home), `${safeName(agent)}--${createHash('sha256').update(String(sid)).digest('hex').slice(0, 32)}.json`);
+}
+function sessionPolicyFile (agent) {
+  return join(tmpdir(), `clevr-session-proof-${safeName(agent)}.json`);
+}
+// Remember what the workspace asks, from a verdict.
+export function writeSessionPolicy (agent, policy) {
+  if (!['off', 'observe', 'require'].includes(policy)) return;
+  try { writeFileSync(sessionPolicyFile(agent), JSON.stringify({ policy, at: Date.now() }), 'utf8'); } catch { /* non-fatal */ }
+}
+export function wantsSessionProof (cfg) {
+  if (process.env.CLEVR_SESSION_PROOF === '1') return true;
+  if (process.env.CLEVR_SESSION_PROOF === '0') return false;
+  try { return ['observe', 'require'].includes(JSON.parse(readFileSync(sessionPolicyFile(cfg && cfg.agent), 'utf8')).policy); } catch { return false; }
+}
+// This session's key and token, if it was opened here and is not about to
+// expire. A session held in custody has a token here and no key.
+export function loadSession (cfg, sid, home = homedir()) {
+  if (!sid) return null;
+  try {
+    const s = JSON.parse(readFileSync(sessionFile(cfg.agent, sid, home), 'utf8'));
+    return s && s.token && (s.key || s.custody === 'endpoint') && s.exp > Date.now() + 60_000 ? s : null;
+  } catch { return null; }
+}
+
+// ── The endpoint agent's custody, over its local socket ─────────────────────
+// A local socket under the home on macOS and Linux; on Windows a named pipe
+// only this user can open, named as the endpoint agent names it (custody.go
+// pipeUser).
+export function custodySocketPath (home = homedir(), platform = process.platform, user = null) {
+  if (process.env.CLEVR_CUSTODY_SOCK) return process.env.CLEVR_CUSTODY_SOCK;
+  if (platform === 'win32') {
+    let u = user;
+    if (u == null) { try { u = userInfo().username; } catch { u = process.env.USERNAME || ''; } }
+    const name = String(u || '').toLowerCase().replace(/[^a-z0-9._-]/g, '') || 'user';
+    return `\\\\.\\pipe\\clevr-custody-${name}`;
+  }
+  return join(home, '.clevr', 'custody.sock');
+}
+const custodyMode = () => {
+  const m = String(process.env.CLEVR_SESSION_CUSTODY || '').toLowerCase();
+  return m === 'require' || m === 'off' ? m : 'auto';
+};
+// One request, one line back. Null when nothing answers (not running, too slow).
+export function custodyCall (req, { timeoutMs = 800, home = homedir() } = {}) {
+  if (custodyMode() === 'off') return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let buf = '', done = false;
+    const end = (v) => { if (!done) { done = true; try { sock.destroy(); } catch { /* closed */ } resolve(v); } };
+    const sock = net.createConnection(custodySocketPath(home));
+    sock.setTimeout(timeoutMs, () => end(null));
+    sock.on('error', () => end(null));
+    sock.on('connect', () => sock.write(JSON.stringify(req) + '\n'));
+    sock.on('data', (d) => {
+      buf += d;
+      const i = buf.indexOf('\n');
+      if (i >= 0) { try { end(JSON.parse(buf.slice(0, i))); } catch { end(null); } }
+    });
+    sock.on('end', () => end(null));
+  });
+}
+// Open the session: a fresh key pair, the public half to Clevr, the token and
+// the private half kept here. Returns the session, { held, message } when the
+// agent's new sessions are held after a stop, or null when it could not open
+// (an older engine, no network): calls then go unsigned, as before.
+export async function openSession (cfg, sid, { goal = null, home = homedir() } = {}) {
+  if (!cfg.apiKey || !sid) return null;
+  // The key in the endpoint agent's custody when it answers; in a file here
+  // otherwise, unless this machine requires custody.
+  const held = await custodyCall({ op: 'open', session_id: String(sid), agent: cfg.agent, runtime: cfg.source }, { home });
+  const custody = !!(held && held.public_key);
+  // Custody that answers and refuses (this session is another harness's) is
+  // not worked around with a file key.
+  if (!custody && (custodyMode() === 'require' || (held && held.error))) return null;
+  let privateKey = null, pub = held && held.public_key;
+  if (!custody) {
+    const kp = generateKeyPairSync('ed25519');
+    privateKey = kp.privateKey;
+    pub = kp.publicKey.export({ format: 'der', type: 'spki' }).subarray(-32).toString('base64');
+  }
+  const r = await httpPostJson(`${cfg.base}/v1/sessions`, {
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
+    body: JSON.stringify({ agent: cfg.agent, public_key: pub, session_id: String(sid), runtime: cfg.source, key_custody: custody ? 'endpoint' : 'file', ...(goal ? { goal: trunc(goal, 500) } : {}) }),
+    timeoutMs: Math.min(cfg.timeoutMs || 15000, 5000),
+  });
+  const j = (() => { try { return JSON.parse(r.body); } catch { return null; } })();
+  if (r.status === 403 && j && j.error === 'sessions_held') return { held: true, message: j.message || 'This agent\'s new sessions are held.' };
+  if (r.status !== 200 || !j || !j.session_token) return null;
+  // The engine's clock, from its answer, so a laptop a few minutes off still
+  // signs proofs the engine accepts (they are good for 5 minutes).
+  const server = Date.parse(r.headers && r.headers.date);
+  const s = { sid: j.session_id, agent: cfg.agent, token: j.session_token, exp: Date.parse(j.expires_at),
+    offset: Number.isFinite(server) ? server - Date.now() : 0,
+    ...(custody ? { custody: 'endpoint' } : { key: privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64') }) };
+  try {
+    mkdirSync(sessionsDir(home), { recursive: true, mode: 0o700 });
+    writeFileSync(sessionFile(cfg.agent, sid, home), JSON.stringify(s), { mode: 0o600 });
+    pruneSessions(home);
+  } catch { /* unsigned from the next call on, as before */ }
+  return s;
+}
+// Sessions older than two days are over: their tokens expired.
+function pruneSessions (home) {
+  try {
+    const dir = sessionsDir(home);
+    for (const f of readdirSync(dir)) {
+      const p = join(dir, f);
+      try { if (Date.now() - lstatSync(p).mtimeMs > 2 * 86_400_000) rmSync(p, { force: true }); } catch { /* next */ }
+    }
+  } catch { /* nothing to prune */ }
+}
+// What is signed for one call, and when.
+function proofParts (session, body) {
+  return {
+    ts: Math.floor((Date.now() + (Number(session.offset) || 0)) / 1000),
+    nonce: randomBytes(12).toString('hex'),
+    digest: sessionCallDigest({ tool: body.tool, action: body.action, target: body.target, args: body.target_attr ?? null }),
+  };
+}
+// The body with its session proof, signed over the call exactly as it is sent,
+// with a key held here.
+export function signedBody (session, body) {
+  const { ts, nonce, digest } = proofParts(session, body);
+  const key = createPrivateKey({ key: Buffer.from(session.key, 'base64'), format: 'der', type: 'pkcs8' });
+  const sig = 'ed25519:' + edSign(null, Buffer.from(sessionSigningString({ sid: session.sid, agent: session.agent, digest, ts, nonce })), key).toString('base64');
+  return { ...body, session_proof: { token: session.token, ts, nonce, sig } };
+}
+// The same, signed by the endpoint agent's custody. Null when it would not
+// (it restarted and holds no key for the session any more, or it is down).
+export async function custodySignedBody (session, body, opts = {}) {
+  const { ts, nonce, digest } = proofParts(session, body);
+  const r = await custodyCall({ op: 'sign', session_id: session.sid, agent: session.agent, digest, ts, nonce }, opts);
+  return r && r.sig ? { ...body, session_proof: { token: session.token, ts, nonce, sig: r.sig } } : null;
+}
+// Sign when asked to, opening the session first when this machine has not yet.
+export async function withSessionProof (cfg, body, { open = true } = {}) {
+  if (!body || !body.session_id || !wantsSessionProof(cfg)) return body;
+  if (body.session_proof) return body;
+  let s = loadSession(cfg, body.session_id);
+  if (!s && open) {
+    const o = await openSession(cfg, body.session_id, { goal: body.session_goal || null }).catch(() => null);
+    if (o && !o.held) s = o;
+  }
+  if (!s) return body;
+  if (!s.custody) return signedBody(s, body);
+  const signed = await custodySignedBody(s, body);
+  if (signed || !open) return signed || body;
+  // Custody lost the key (restarted): the session is opened again, once.
+  const o = await openSession(cfg, body.session_id, { goal: body.session_goal || null }).catch(() => null);
+  return (o && !o.held && o.custody && await custodySignedBody(o, body)) || body;
+}
+// The same, for the paths that cannot wait (a record sent and not waited on):
+// signed when the session's key is held here; a session in custody is signed
+// before, by the caller (postPrompt).
+function withSessionProofNow (cfg, body) {
+  if (!body || !body.session_id || body.session_proof || !wantsSessionProof(cfg)) return body;
+  const s = loadSession(cfg, body.session_id);
+  return s && !s.custody ? signedBody(s, body) : body;
 }
 
 // One-shot GET, same socket discipline as the POST above, for the status
@@ -441,7 +654,7 @@ export async function postEvaluate (cfg, body) {
   try {
     const r = await httpPostJson(`${cfg.base}/v1/evaluate`, {
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
-      body: JSON.stringify(withMachine(body)),
+      body: JSON.stringify(withMachine(await withSessionProof(cfg, body))),
       timeoutMs: cfg.timeoutMs,
     });
     if (r.status < 200 || r.status >= 300) throw new Error(`HTTP ${r.status}`);
@@ -456,6 +669,7 @@ export async function postEvaluate (cfg, body) {
       throw new Error('engine returned no verdict effect');
     }
     writeFailsafeCache(cfg.agent, verdict.failsafe, verdict.gate_prompts);   // remember the policy for offline calls
+    writeSessionPolicy(cfg.agent, verdict.session_proof);                     // and whether calls are to be signed
     return { verdict };
   } catch (e) {
     // Brain unreachable → last-known workspace/agent policy (disk cache), else the
@@ -483,7 +697,7 @@ export function postUnwatched (cfg, body) {
     let url;
     try { url = new URL(`${cfg.base}/v1/evaluate`); } catch { finish(); return; }
     const mod = url.protocol === 'https:' ? https : http;
-    const payload = Buffer.from(JSON.stringify(withMachine(body)));
+    const payload = Buffer.from(JSON.stringify(withMachine(withSessionProofNow(cfg, body))));
     const req = mod.request(url, {
       method: 'POST',
       agent: false,
@@ -519,7 +733,7 @@ export function postDetached (cfg, body) {
   if (!cfg.apiKey) return false;
   try {
     const file = join(tmpdir(), `clevr-send-${process.pid}-${randomBytes(6).toString('hex')}.json`);
-    writeFileSync(file, JSON.stringify({ url: `${cfg.base}/v1/evaluate`, apiKey: cfg.apiKey, body: withMachine(body) }), { mode: 0o600 });
+    writeFileSync(file, JSON.stringify({ url: `${cfg.base}/v1/evaluate`, apiKey: cfg.apiKey, body: withMachine(withSessionProofNow(cfg, body)) }), { mode: 0o600 });
     const sender = join(dirname(fileURLToPath(import.meta.url)), 'clevr-send.mjs');
     // An install that did not ship the sender (an older installer copied the
     // shared helpers alone) sends the record the older way instead of spawning
@@ -542,7 +756,10 @@ export function postDetached (cfg, body) {
 export async function postPrompt (cfg, body) {
   if (promptsUngatedRecently(cfg.agent)) {
     const lost = lostRecords();
-    return { ungated: true, sent: postDetached(cfg, body) || await postUnwatched(cfg, body), ...(lost ? { lost } : {}) };
+    // Signed here, while this hook still runs under the harness: the detached
+    // sender does not, and custody would refuse it.
+    const signed = await withSessionProof(cfg, body, { open: false }).catch(() => body);
+    return { ungated: true, sent: postDetached(cfg, signed) || await postUnwatched(cfg, signed), ...(lost ? { lost } : {}) };
   }
   const res = await postEvaluate({ ...cfg, timeoutMs: cfg.promptTimeoutMs }, body);
   if (res.failclosed && readGatePromptsCache(cfg.agent) === false) return { ungated: true, sent: false };
@@ -1054,6 +1271,111 @@ export function skillLoadsIn (toolName, toolInput, cwd, { home = homedir() } = {
   return [...found.values()];
 }
 
+// ── The scripts a command runs ──────────────────────────────────────────────
+// `bash deploy.sh` showed Clevr a name: what deploy.sh does ran unread, and a
+// line the floor refuses typed directly passed inside a script. The gate reads
+// each script a shell command runs and sends what it holds; in sensitive mode
+// only its hash leaves the machine. The brain reads it with the command (brain
+// lib/script_runs.js, shell_reconstruct.js shellRunOf).
+const SCRIPT_READ_MAX = 256 * 1024;
+const SCRIPT_SEND_MAX = 32000;
+const SCRIPT_INTERPRETER = { bash: 'shell', sh: 'shell', zsh: 'shell', dash: 'shell', ksh: 'shell', source: 'shell', '.': 'shell',
+  python: 'python', python3: 'python', node: 'javascript', bun: 'javascript', deno: 'javascript', tsx: 'javascript', 'ts-node': 'javascript',
+  ruby: 'ruby', perl: 'perl', php: 'php', pwsh: 'powershell', powershell: 'powershell' };
+const SCRIPT_EXT = { sh: 'shell', bash: 'shell', zsh: 'shell', py: 'python', js: 'javascript', mjs: 'javascript', cjs: 'javascript', ts: 'javascript',
+  rb: 'ruby', pl: 'perl', php: 'php', ps1: 'powershell' };
+// Augment's shell is `launch-process`.
+const SCRIPT_SHELL_TOOL = /(bash|shell|terminal|exec|command|powershell|run|launch-process)/i;
+const RUN_PREFIX = /^(sudo|time|nohup|exec|env|nice|command)$/;
+const ENV_ASSIGN = /^[A-Za-z_][A-Za-z0-9_]*=/;
+const extOf = (p) => { const m = /\.([A-Za-z0-9]+)$/.exec(String(p)); return m ? m[1].toLowerCase() : ''; };
+const shellWords = (s) => [...String(s).matchAll(/"((?:[^"\\]|\\.)*)"|'([^']*)'|(\S+)/g)].map((m) => m[1] ?? m[2] ?? m[3]);
+function commandOfInput (toolInput) {
+  if (typeof toolInput === 'string') return toolInput;
+  const c = toolInput && (toolInput.command ?? toolInput.cmd);
+  if (typeof c === 'string') return c;
+  if (Array.isArray(c) && c.every((x) => typeof x === 'string')) return c.join(' ');
+  return '';
+}
+function shebangLanguage (text) {
+  const m = /^#!\s*(\S+)(?:\s+(\S+))?/.exec(text);
+  if (!m) return null;
+  const prog = (m[1].endsWith('/env') ? m[2] : m[1].split('/').pop()) || '';
+  return SCRIPT_INTERPRETER[prog.replace(/[0-9.]+$/, '')] || SCRIPT_INTERPRETER[prog] || null;
+}
+function readScript (path, cwd, home, language, sensitive) {
+  const shown = String(path);
+  const abs = shown.startsWith('~/') ? join(home, shown.slice(2)) : isAbsolute(shown) ? shown : resolve(cwd || process.cwd(), shown);
+  let st;
+  try { st = statSync(abs); } catch { return { path: shown, language: language || 'shell', unread: 'missing' }; }
+  if (!st.isFile()) return null;
+  if (st.size > SCRIPT_READ_MAX) return { path: shown, language: language || 'shell', bytes: st.size, unread: 'too_large' };
+  let buf;
+  try { buf = readFileSync(abs); } catch { return { path: shown, language: language || 'shell', unread: 'unreadable' }; }
+  if (buf.subarray(0, 8192).includes(0)) return { path: shown, language: language || 'shell', bytes: buf.length, unread: 'binary' };
+  const text = buf.toString('utf8');
+  const out = { path: shown, language: language || shebangLanguage(text) || 'shell', sha256: createHash('sha256').update(buf).digest('hex'), bytes: buf.length };
+  if (sensitive) return { ...out, unread: 'sensitive' };
+  return { ...out, content: text.slice(0, SCRIPT_SEND_MAX), ...(text.length > SCRIPT_SEND_MAX ? { truncated: true } : {}) };
+}
+// A package script runs a command line kept in package.json, with its pre and
+// post scripts around it: `npm run deploy` is what scripts.deploy says.
+function packageScript (manager, words, i, cwd, sensitive) {
+  let name = null;
+  const a = words[i + 1];
+  if (a === 'run' || a === 'run-script') name = words[i + 2];
+  else if (manager === 'npm' && ['test', 't', 'start', 'stop', 'restart'].includes(a)) name = a === 't' ? 'test' : a;
+  else if (manager !== 'npm' && a && !a.startsWith('-')) name = a;
+  if (!name || name.startsWith('-')) return null;
+  let scripts;
+  try { scripts = JSON.parse(readFileSync(join(cwd || process.cwd(), 'package.json'), 'utf8')).scripts || {}; } catch { return null; }
+  const lines = [`pre${name}`, name, `post${name}`].map((k) => scripts[k]).filter((v) => typeof v === 'string' && v.trim());
+  if (!scripts[name]) return null;
+  const text = lines.join('\n');
+  const out = { path: `package.json#scripts.${name}`, language: 'shell', sha256: createHash('sha256').update(text).digest('hex'), bytes: Buffer.byteLength(text) };
+  return sensitive ? { ...out, unread: 'sensitive' } : { ...out, content: text.slice(0, SCRIPT_SEND_MAX) };
+}
+export function scriptRunsIn (toolName, toolInput, cwd, { sensitive = false, home = homedir() } = {}) {
+  if (!SCRIPT_SHELL_TOOL.test(String(toolName || ''))) return [];
+  const cmd = commandOfInput(toolInput).slice(0, 16000);
+  if (!cmd.trim()) return [];
+  const out = new Map();
+  let at = cwd || process.cwd();
+  try {
+    for (const seg of cmd.split(/&&|\|\||[;|\n]/)) {
+      if (out.size >= 4) break;
+      const words = shellWords(seg);
+      // `cd x && ./deploy.sh` runs x/deploy.sh.
+      if (words[0] === 'cd' && words[1] && words.length === 2) { at = words[1].startsWith('~/') ? join(home, words[1].slice(2)) : resolve(at, words[1]); continue; }
+      let i = 0;
+      while (i < words.length && (ENV_ASSIGN.test(words[i]) || RUN_PREFIX.test(words[i]))) i++;
+      const prog = words[i];
+      if (!prog) continue;
+      const base = prog.split('/').pop();
+      let found = null;
+      if (/^(npm|pnpm|yarn)$/.test(base)) {
+        found = packageScript(base, words, i, at, sensitive);
+      } else if (SCRIPT_INTERPRETER[base] || SCRIPT_INTERPRETER[base.replace(/[0-9.]+$/, '')]) {
+        const language = SCRIPT_INTERPRETER[base] || SCRIPT_INTERPRETER[base.replace(/[0-9.]+$/, '')];
+        let j = i + 1;
+        if (base === 'deno' && words[j] === 'run') j++;
+        if (language === 'powershell') { const f = words.findIndex((w, k) => k > i && /^-file$/i.test(w)); j = f > 0 ? f + 1 : -1; }
+        // -c, -e, -m, --eval: inline code or a module, which the brain reads itself.
+        while (j > 0 && j < words.length && words[j].startsWith('-')) { if (/^(-c|-e|-m|-p|--eval|--print|-command)$/i.test(words[j])) { j = -1; break; } j++; }
+        const path = j > 0 ? words[j] : null;
+        // An argument that is neither a script by its name nor a file is something else (python -W ignore x.py).
+        if (path && (SCRIPT_EXT[extOf(path)] || path.includes('/') || existsSync(resolve(at, path)))) found = readScript(path, at, home, language, sensitive);
+      } else if (prog.includes('/') || SCRIPT_EXT[extOf(prog)]) {
+        // ./deploy.sh, scripts/run.py, /opt/job.sh: a file run as the program.
+        found = readScript(prog, at, home, SCRIPT_EXT[extOf(prog)] || null, sensitive);
+        if (found && found.unread === 'missing' && !SCRIPT_EXT[extOf(prog)]) found = null;
+      }
+      if (found && !out.has(found.path)) out.set(found.path, found);
+    }
+  } catch { /* a command we cannot read sends no script */ }
+  return [...out.values()];
+}
+
 // The skills a person names in the prompt they type, the way their harness
 // lets them: $name in Codex, /name in Cursor and Copilot. Only a name that is a
 // skill on this machine counts, so $HOME or /tmp in a sentence is nothing.
@@ -1111,7 +1433,7 @@ export async function gateSkillLoads (cfg, loads, { honorShadow = false, recordO
     const body = skillLoadBody(cfg, load, ctx);
     const input = { skill: load.name };
     const pending = rememberedHold(cfg.agent, 'Skill', input);
-    if (pending) body.resume = pending;
+    if (pending) Object.assign(body, resumeFields(pending));
     const res = await postEvaluate(cfg, body);
     if (res.inactive) return null;
     if (res.failclosed) { if (recordOnly) continue; return { message: res.reason }; }
