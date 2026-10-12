@@ -1441,9 +1441,11 @@ export async function gateSkillLoads (cfg, loads, { honorShadow = false, recordO
     const v = res.verdict;
     const effect = v.effect;
     const id = v.decision_id || null;
-    const tag = id ? ` [${id}]` : '';
+    // A retry joined to the request already waiting names and presents it.
+    const heldId = v.held_as || id;
+    const tag = heldId ? ` [${heldId}]` : '';
     const held = effect === 'escalate' || effect === 'step_up';
-    if (held) rememberHold(cfg.agent, 'Skill', input, id);
+    if (held) rememberHold(cfg.agent, 'Skill', input, heldId);
     else if (pending) rememberHold(cfg.agent, 'Skill', input, null);
     if (honorShadow && cfg.mode === 'shadow') continue;
     if (effect !== 'block' && !(held && cfg.escalate !== 'allow')) continue;

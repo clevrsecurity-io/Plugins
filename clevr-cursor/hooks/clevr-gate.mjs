@@ -137,7 +137,11 @@ async function main () {
   const effect = v.effect;
   const reason = v.reason || '';
   const decisionId = v.decision_id || null;
-  const tag = decisionId ? ` [${decisionId}]` : '';
+  // A retry the engine joined to the request already waiting (held_as) is
+  // never answered on its own: that request is what a person approves, what
+  // the message names and what the next retry presents.
+  const heldId = v.held_as || decisionId;
+  const tag = heldId ? ` [${heldId}]` : '';
 
   // Answer Cursor, but FIRST confirm to the engine what the gate actually did — so
   // the console shows "did not run" only when the gate truly refused it, never
@@ -165,7 +169,7 @@ async function main () {
   if (effect === 'block') return decide('deny', 'denied', tenantMsg ? `${tenantMsg}${tag}` : `Clevr blocked this action: ${reason}${tag}`);
   // Remember which decision this action was held on, so the retry can spend
   // the approval; forget it as soon as the action runs.
-  if (effect === 'escalate' || effect === 'step_up') rememberHold(cfg.agent, toolName, toolInput, decisionId);
+  if (effect === 'escalate' || effect === 'step_up') rememberHold(cfg.agent, toolName, toolInput, heldId);
   else if (pending) rememberHold(cfg.agent, toolName, toolInput, null);
 
   if (effect === 'escalate' || effect === 'step_up') {
