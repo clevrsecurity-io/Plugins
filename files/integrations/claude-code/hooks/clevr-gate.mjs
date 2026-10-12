@@ -167,7 +167,11 @@ async function main () {
   const effect = verdict.effect;
   const reason = verdict.reason || '';
   const decisionId = verdict.decision_id || null;
-  const tag = decisionId ? ` [${decisionId}]` : '';
+  // A retry the engine joined to the request already waiting (held_as) is
+  // never answered on its own: that request is what a person approves, what
+  // the message names and what the next retry presents.
+  const heldId = verdict.held_as || decisionId;
+  const tag = heldId ? ` [${heldId}]` : '';
   // A workspace can write its own refusal copy. When it has, that is what its
   // people are meant to read, so it replaces ours rather than sitting unused
   // behind it.
@@ -208,7 +212,7 @@ async function main () {
   // Remember which decision this action was held on, so the retry can spend the
   // approval. Forgotten as soon as the action runs: an id already spent, or one
   // the engine no longer holds, has nothing left to buy.
-  if (effect === 'escalate' || effect === 'step_up') rememberHold(cfg.agent, tool_name, tool_input, decisionId);
+  if (effect === 'escalate' || effect === 'step_up') rememberHold(cfg.agent, tool_name, tool_input, heldId);
   else if (pending) rememberHold(cfg.agent, tool_name, tool_input, null);
 
   if (effect === 'escalate' || effect === 'step_up') {

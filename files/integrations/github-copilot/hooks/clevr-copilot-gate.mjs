@@ -129,7 +129,11 @@ async function main () {
   const verdict = res.verdict;
   const effect = verdict.effect;
   const decisionId = verdict.decision_id || null;
-  const tag = decisionId ? ` [${decisionId}]` : '';
+  // A retry the engine joined to the request already waiting (held_as) is
+  // never answered on its own: that request is what a person approves, what
+  // the message names and what the next retry presents.
+  const heldId = verdict.held_as || decisionId;
+  const tag = heldId ? ` [${heldId}]` : '';
   const tenantMsg = (effect === 'block' ? verdict.block_message : verdict.stepup_message) || null;
   const authority = verdict.matched_policy === 'role-boundary';
   const reason = tenantMsg || verdict.reason || (authority ? 'Outside this agent’s mandate.' : 'Held by Clevr.');
@@ -149,7 +153,7 @@ async function main () {
   if (effect === 'block') return decide('deny', 'denied', reason + tag);
   // Remember which decision this action was held on, so the retry can spend
   // the approval; forget it as soon as the action runs.
-  if (effect === 'escalate' || effect === 'step_up') rememberHold(cfg.agent, toolName, toolArgs, decisionId);
+  if (effect === 'escalate' || effect === 'step_up') rememberHold(cfg.agent, toolName, toolArgs, heldId);
   else if (pending) rememberHold(cfg.agent, toolName, toolArgs, null);
 
   if (effect === 'escalate' || effect === 'step_up') {
