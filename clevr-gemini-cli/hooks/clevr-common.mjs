@@ -102,9 +102,10 @@ export function rememberedHold (agent, tool, input) {
     const v = JSON.parse(readFileSync(heldFile(agent), 'utf8'));
     const e = v[actionKey(tool, input)];
     if (!e || !e.id) return null;
-    // The engine's own window is thirty minutes; anything older cannot be spent,
-    // so there is no point sending it.
-    if (Date.now() - Number(e.at || 0) > 30 * 60_000) return null;
+    // Kept while it can still be spent: a hold waits up to a day (stepup_ttl_min
+    // caps at 1440) and the engine's thirty minutes run from the approval, not
+    // from the hold. Thirty minutes from the hold lost a later approval.
+    if (Date.now() - Number(e.at || 0) > 25 * 3600_000) return null;
     return e.id;
   } catch { return null; }
 }
