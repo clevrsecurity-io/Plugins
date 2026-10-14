@@ -35,7 +35,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 let pass = 0, fail = 0
 const ok = (c, n, d = '') => { if (c) { pass++; console.log('  ok  ', n) } else { fail++; console.log('  FAIL', n, d) } }
 
-let holds = 0, approved = null, presented = null, joins = 0
+let holds = 0, approved = null, presented = null, joins = 0, savedLine = null
 const engine = http.createServer((req, res) => {
   let b = ''; req.on('data', (c) => (b += c))
   req.on('end', () => {
@@ -53,6 +53,13 @@ const engine = http.createServer((req, res) => {
       v = approved && presented.includes(approved) ? { effect: 'allow', decision_id: 'dec_run' }
         : ++joins === 1 ? { effect: 'escalate', reason: 'a person decides.', decision_id: 'dec_join_1' }
           : { effect: 'escalate', reason: 'a person decides.', decision_id: `dec_joined_${joins}`, held_as: 'dec_join_1' }
+    }
+    // The engine compares the action line as text (routes/evaluate.js SAME_HELD_ACTION).
+    if (/save/.test(tool)) {
+      presented = [...(body.resume_candidates || []), ...(body.resume ? [body.resume] : [])]
+      v = approved && presented.includes(approved) && body.action === savedLine ? { effect: 'allow', decision_id: 'dec_run' }
+        : { effect: 'escalate', reason: 'a person decides.', decision_id: `dec_save_${++holds}` }
+      savedLine ??= body.action
     }
     res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(v))
   })
@@ -125,6 +132,15 @@ try {
   approved = 'dec_join_1'
   call(13, 'invoice.send', { id: 7 })
   ok(/ran invoice\.send/.test(text(await reply(13))), 'the request approved, the identical retry runs')
+
+  console.log('— the same arguments in another key order are the same call —')
+  approved = null
+  call(14, 'notes.save', { path: '/data/a.txt', content: 'x', options: { mode: 'w', encoding: 'utf8' } })
+  const s1 = await reply(14)
+  approved = (text(s1).match(/dec_save_\d+/) || [])[0]
+  call(15, 'notes.save', { options: { encoding: 'utf8', mode: 'w' }, content: 'x', path: '/data/a.txt' })
+  ok(/ran notes\.save/.test(text(await reply(15))), 'approved, the retry with its keys in another order runs', JSON.stringify(presented))
+  ok(seen().filter((l) => l === 'tools/call notes.save').length === 1, 'the upstream ran it exactly once', JSON.stringify(seen()))
 } finally {
   guard.kill(); engine.close()
   try { fs.rmSync(TMP, { recursive: true, force: true }) } catch {}

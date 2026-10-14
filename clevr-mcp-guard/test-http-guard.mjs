@@ -64,7 +64,7 @@ const upstream = http.createServer(async (req, res) => {
 // export is held, everything else passes.
 let engineDown = false;
 // A hold the engine spends only when its approved id is among those presented.
-let holds = 0, approved = null, presented = null, joins = 0;
+let holds = 0, approved = null, presented = null, joins = 0, savedLine = null;
 const engine = http.createServer(async (req, res) => {
   if (engineDown) { req.destroy(); return; }
   const c = []; for await (const x of req) c.push(x);
@@ -84,6 +84,14 @@ const engine = http.createServer(async (req, res) => {
     return res.end(JSON.stringify(run ? { effect: 'allow', decision_id: 'dec_run' }
       : ++joins === 1 ? { effect: 'escalate', reason: 'a person decides', decision_id: 'dec_join_1' }
         : { effect: 'escalate', reason: 'a person decides', decision_id: `dec_joined_${joins}`, held_as: 'dec_join_1' }));
+  }
+  // The engine compares the action line as text (routes/evaluate.js SAME_HELD_ACTION).
+  if (/save/.test(tool)) {
+    presented = [...(body.resume_candidates || []), ...(body.resume ? [body.resume] : [])];
+    const run = approved && presented.includes(approved) && body.action === savedLine;
+    savedLine ??= body.action;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify(run ? { effect: 'allow', decision_id: 'dec_run' } : { effect: 'escalate', reason: 'a person decides', decision_id: `dec_save_${++holds}` }));
   }
   const effect = /delete/.test(tool) ? 'block' : /export/.test(tool) ? 'escalate' : 'allow';
   res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -237,6 +245,14 @@ async function main () {
   ok('the request approved, the identical retry runs', !refused(joinRun) && ran.length === beforeJoinRun + 1, said(joinRun));
   approved = null;
 
+  console.log('\n— the same arguments in another key order are the same call —');
+  const s1 = await call('notes.save', { path: '/data/a.txt', content: 'x', options: { mode: 'w', encoding: 'utf8' } });
+  approved = (said(s1).match(/dec_save_\d+/) || [])[0];
+  const beforeSave = ran.length;
+  const s2 = await call('notes.save', { options: { encoding: 'utf8', mode: 'w' }, content: 'x', path: '/data/a.txt' });
+  ok('approved, the retry with its keys in another order runs once', !refused(s2) && ran.length === beforeSave + 1, said(s2));
+  approved = null;
+
   console.log('\n— the failsafe —');
   engineDown = true;
   const openCall = await call('files.delete', { path: '/tmp/x' });
@@ -255,12 +271,12 @@ async function main () {
 
   console.log('\n— the whole run, from the server\'s side —');
   // Two db.query (the allow and the argument check), each approved retry once
-  // (report.publish, invoice.send), one files.delete, and that
+  // (report.publish, invoice.send, notes.save), one files.delete, and that
   // one is the fail-open forward. The refused delete and the fail-closed query
   // are absent, which is the point: three tool calls were made through the guard
   // and only the ones it cleared were run.
   ok(`the upstream ran ${JSON.stringify(ran)}`,
-    JSON.stringify(ran) === '["db.query","db.query","report.publish","invoice.send","files.delete"]',
+    JSON.stringify(ran) === '["db.query","db.query","report.publish","invoice.send","notes.save","files.delete"]',
     'the upstream log is the only claim that cannot be argued with');
 
   guard.kill();

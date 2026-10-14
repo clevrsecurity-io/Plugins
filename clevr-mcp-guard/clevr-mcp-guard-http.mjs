@@ -74,7 +74,14 @@ const HELD_TTL_MS = 25 * 3600_000;
 const HELD_MAX = 2000;
 const held = new Map();
 const SHELL_TOOL = /(bash|shell|terminal|exec|command|powershell|run|launch-process)/i;
-const heldKey = (name, args) => `${name}::${JSON.stringify(SHELL_TOOL.test(name) && args && typeof args === 'object' && 'command' in args ? { command: args.command } : (args ?? null))}`;
+// The same arguments in another key order are the same call, for this memory
+// and for the action line the engine compares as text. Arrays keep their order.
+function canonicalArgs (v) {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v === undefined ? null : v);
+  if (Array.isArray(v)) return '[' + v.map(canonicalArgs).join(',') + ']';
+  return '{' + Object.keys(v).sort().filter((k) => v[k] !== undefined).map((k) => JSON.stringify(k) + ':' + canonicalArgs(v[k])).join(',') + '}';
+}
+const heldKey = (name, args) => `${name}::${canonicalArgs(SHELL_TOOL.test(name) && args && typeof args === 'object' && 'command' in args ? { command: args.command } : (args ?? null))}`;
 function rememberedHolds (key) {
   const e = held.get(key);
   if (!e) return [];
@@ -99,7 +106,7 @@ async function evaluate (name, args, sessionId, holds = []) {
         agent: AGENT,
         tool: name,
         action_type: 'tool_call',
-        action: `${name}(${trunc(JSON.stringify(args ?? {}))})`,
+        action: `${name}(${trunc(canonicalArgs(args ?? {}))})`,
         // The real arguments, so argument rules and the content floor read the
         // values rather than a label. Same shape as every other Clevr gate.
         target_attr: (args && typeof args === 'object' && !Array.isArray(args)) ? args : null,
