@@ -22,7 +22,7 @@
 // clevr-common.mjs for the full CLEVR_* list.
 
 import { readFileSync } from 'node:fs';
-import { trunc, loadConfig, readConversation, postEvaluate, confirmEnforcement, machineContext, evidenceRefs, actsFor, rememberedHold, rememberHold, resumeFields, effectiveFailsafe, describeSkill, skillLoadsIn, gateSkillLoads, scriptRunsIn, modelFields } from './clevr-common.mjs';
+import { trunc, canonicalArgs, loadConfig, readConversation, postEvaluate, confirmEnforcement, machineContext, evidenceRefs, actsFor, rememberedHold, rememberHold, resumeFields, effectiveFailsafe, describeSkill, skillLoadsIn, gateSkillLoads, scriptRunsIn, modelFields } from './clevr-common.mjs';
 
 function out (decision, reason) {
   if (decision) {
@@ -57,7 +57,7 @@ function classify (tool, input = {}) {
   if (t === 'WebSearch')
     return { action_type: 'read', action: `search ${trunc(input.query || '', 120)}`.trim(), target: null };
   // mcp__server__tool and everything else: a generic gated tool call.
-  return { action_type: 'tool_call', action: `${t}(${trunc(JSON.stringify(input))})`, target: null };
+  return { action_type: 'tool_call', action: `${t}(${trunc(canonicalArgs(input))})`, target: null };
 }
 
 let cfg = null;   // module-scoped so the top-level catch can read the fail policy

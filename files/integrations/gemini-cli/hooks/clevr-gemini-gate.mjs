@@ -16,7 +16,7 @@
 // silently dropped or presented as a refusal. CLEVR_ESCALATE=allow inverts
 // that for a team that wants holds recorded and not enforced here.
 import { readFileSync } from 'node:fs';
-import { trunc, loadConfig, readConversation, postEvaluate, confirmEnforcement, actsFor, rememberedHold, rememberHold, resumeFields, effectiveFailsafe, describeSkill, skillLoadsIn, gateSkillLoads, scriptRunsIn } from './clevr-common.mjs';
+import { trunc, canonicalArgs, loadConfig, readConversation, postEvaluate, confirmEnforcement, actsFor, rememberedHold, rememberHold, resumeFields, effectiveFailsafe, describeSkill, skillLoadsIn, gateSkillLoads, scriptRunsIn } from './clevr-common.mjs';
 
 function out (decision, reason) {
   if (decision) process.stdout.write(JSON.stringify({ decision, reason: reason || '' }));
@@ -30,7 +30,7 @@ function classify (tool, input = {}) {
   if (/shell|run_command|execute/.test(t)) {
     // An MCP code runner (ctx_execute) matches too, and carries `code`, not `command`.
     const run = input.command || (typeof input.code === 'string' ? input.code : '');
-    return { action_type: 'exec', action: trunc(run || `${tool}(${JSON.stringify(input)})`), target: null };
+    return { action_type: 'exec', action: trunc(run || `${tool}(${canonicalArgs(input)})`), target: null };
   }
   if (/write_file|replace|edit|create/.test(t)) {
     const path = input.file_path || input.path || input.absolute_path || '';
@@ -44,7 +44,7 @@ function classify (tool, input = {}) {
     const url = input.url || input.prompt || input.query || '';
     return { action_type: 'network', action: `fetch ${trunc(url, 120)}`.trim(), target: input.url || null };
   }
-  return { action_type: 'tool_call', action: `${tool}(${trunc(JSON.stringify(input))})`, target: null };
+  return { action_type: 'tool_call', action: `${tool}(${trunc(canonicalArgs(input))})`, target: null };
 }
 
 let cfg = null;   // module-scoped so the top-level catch can read the fail policy

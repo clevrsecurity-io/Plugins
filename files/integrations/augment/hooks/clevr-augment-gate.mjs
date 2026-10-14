@@ -20,7 +20,7 @@
 // recorded. That is a real posture some teams want, and it is a choice they make
 // rather than a default we make for them.
 import { readFileSync } from 'node:fs';
-import { trunc, loadConfig, postEvaluate, confirmEnforcement, actsFor, rememberedHold, rememberHold, resumeFields, effectiveFailsafe, skillLoadsIn, gateSkillLoads, scriptRunsIn } from './clevr-common.mjs';
+import { trunc, canonicalArgs, loadConfig, postEvaluate, confirmEnforcement, actsFor, rememberedHold, rememberHold, resumeFields, effectiveFailsafe, skillLoadsIn, gateSkillLoads, scriptRunsIn } from './clevr-common.mjs';
 
 function out (decision, reason) {
   if (decision) {
@@ -55,7 +55,7 @@ function classify (tool, input = {}, isMcp = false) {
     const url = input.url || input.query || '';
     return { action_type: 'network', action: `fetch ${url}`.trim(), target: input.url || null };
   }
-  return { action_type: isMcp ? 'tool_call' : 'tool_call', action: `${tool}(${trunc(JSON.stringify(input))})`, target: null };
+  return { action_type: isMcp ? 'tool_call' : 'tool_call', action: `${tool}(${trunc(canonicalArgs(input))})`, target: null };
 }
 
 let cfg = null;   // module-scoped so the top-level catch can read the fail policy
