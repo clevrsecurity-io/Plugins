@@ -22,7 +22,7 @@
 // a JSON decision on stdout. Exit 0 with no JSON is an additive no-op.
 
 import { readFileSync } from 'node:fs';
-import { trunc, loadConfig, postEvaluate, confirmEnforcement, actsFor, rememberedHold, rememberHold, resumeFields, machineContext, evidenceRefs, effectiveFailsafe, skillLoadsIn, gateSkillLoads, scriptRunsIn } from './clevr-common.mjs';
+import { trunc, canonicalArgs, loadConfig, postEvaluate, confirmEnforcement, actsFor, rememberedHold, rememberHold, resumeFields, machineContext, evidenceRefs, effectiveFailsafe, skillLoadsIn, gateSkillLoads, scriptRunsIn } from './clevr-common.mjs';
 
 // permission ∈ 'allow' | 'deny' | 'ask'. null => print nothing (additive no-op),
 // so Cursor's normal flow proceeds unchanged (used for allow + shadow).
@@ -51,7 +51,7 @@ function classify (toolName, input = {}) {
     return { action_type: net ? 'network' : 'read', action: `${t} ${trunc(p, 120)}`.trim(), target: input.file_path || input.path || input.url || null };
   }
   // MCP tool or anything else: a generic gated tool call.
-  return { action_type: 'tool_call', action: `${t}(${trunc(JSON.stringify(input))})`, target: input.url || null };
+  return { action_type: 'tool_call', action: `${t}(${trunc(canonicalArgs(input))})`, target: input.url || null };
 }
 
 let cfg = null;   // module-scoped so the top-level catch can read the fail policy

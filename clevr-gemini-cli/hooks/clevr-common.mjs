@@ -90,10 +90,17 @@ function heldFile (agent) {
 // remembered under another key, sent no resume and was held again (2026-10-11).
 // The engine compares a shell call's arguments on the command alone too.
 const HELD_SHELL_TOOL = /(bash|shell|terminal|exec|command|powershell|run|launch-process)/i;
+/** The same arguments in another key order are the same call, for this memory
+ *  and for the action line the engine compares as text. Arrays keep their order. */
+export function canonicalArgs (v) {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v === undefined ? null : v);
+  if (Array.isArray(v)) return '[' + v.map(canonicalArgs).join(',') + ']';
+  return '{' + Object.keys(v).sort().filter((k) => v[k] !== undefined).map((k) => JSON.stringify(k) + ':' + canonicalArgs(v[k])).join(',') + '}';
+}
 function actionKey (tool, input) {
   let args = '';
   const shell = HELD_SHELL_TOOL.test(String(tool || '')) && input && typeof input === 'object' && !Array.isArray(input) && 'command' in input;
-  try { args = JSON.stringify(shell ? { command: input.command } : (input ?? null)); } catch { args = String(input ?? ''); }
+  try { args = canonicalArgs(shell ? { command: input.command } : (input ?? null)); } catch { args = String(input ?? ''); }
   return createHash('sha256').update(`${tool || ''}::${args}`).digest('hex').slice(0, 32);
 }
 /** The decisions this exact action was held on, newest last, if still fresh.

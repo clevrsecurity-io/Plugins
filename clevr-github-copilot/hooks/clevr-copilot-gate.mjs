@@ -26,7 +26,7 @@ import { readFileSync } from 'node:fs';
 // shared helpers into ~/.clevr/tools together, where a repo-relative path does
 // not exist. In the repo the sibling is a one-line re-export, so there is still
 // exactly one copy of the logic.
-import { trunc, loadConfig, postEvaluate, confirmEnforcement, actsFor, rememberedHold, rememberHold, resumeFields, effectiveFailsafe, skillLoadsIn, gateSkillLoads, scriptRunsIn } from './clevr-common.mjs';
+import { trunc, canonicalArgs, loadConfig, postEvaluate, confirmEnforcement, actsFor, rememberedHold, rememberHold, resumeFields, effectiveFailsafe, skillLoadsIn, gateSkillLoads, scriptRunsIn } from './clevr-common.mjs';
 
 function out (decision, reason) {
   if (decision) {
@@ -62,7 +62,7 @@ function classify (tool, args = {}) {
     const url = args.url || args.uri || '';
     return { action_type: 'network', action: `fetch ${url}`.trim(), target: url || null };
   }
-  return { action_type: 'tool_call', action: `${tool}(${trunc(JSON.stringify(args))})`, target: null };
+  return { action_type: 'tool_call', action: `${tool}(${trunc(canonicalArgs(args))})`, target: null };
 }
 
 let cfg = null;   // module-scoped so the top-level catch can read the fail policy
